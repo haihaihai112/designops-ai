@@ -12,7 +12,6 @@ ComfyUI 需要在后台运行（默认 http://127.0.0.1:8188）。
 
 import json
 import time
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -223,10 +222,19 @@ def generate_image(
         filename = images[0]["filename"]
         dest = download_image(filename, COMFYUI_CONFIG["output_dir"])
 
+        if dest is None:
+            return {
+                "success": False,
+                "image_path": None,
+                "seed": workflow["7"]["inputs"]["seed"],
+                "prompt_id": prompt_id,
+                "error": "ComfyUI 已生成图像，但下载结果失败",
+            }
+
         return {
             "success": True,
-            "image_path": str(dest) if dest else None,
-            "seed": seed if seed != -1 else None,
+            "image_path": str(dest),
+            "seed": workflow["7"]["inputs"]["seed"],
             "prompt_id": prompt_id,
             "error": None,
         }

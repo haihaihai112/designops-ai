@@ -34,6 +34,3 @@ Title: [Style] [Room Type] Concept
 Caption: A warm and refined [room type] designed with [materials], [lighting], and [key furniture]. The palette focuses on [colors], creating a space that feels [mood keywords].
 Hashtags: #[style] #[roomtype] #interiordesign #homedecor #aiinterior #coohom
 ```
-
-## 面试展示话术
-这个模块对应 JD 中的“关注海外设计趋势，制定并发布模型/工具内容，包括文案、图像和视频”。可以展示自己能把生成结果继续转化为运营内容。

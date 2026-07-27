@@ -42,6 +42,14 @@ def _get_llm_client():
     )
 
 
+def _should_use_llm() -> bool:
+    """判断当前配置是否足够调用 LLM。Ollama 等本地服务允许使用占位 key。"""
+    api_base = LLM_CONFIG["api_base"].lower()
+    has_key = bool(LLM_CONFIG["api_key"].strip())
+    is_local = "localhost" in api_base or "127.0.0.1" in api_base
+    return has_key or is_local
+
+
 def _detect_style(user_input: str) -> str:
     """从用户输入中检测设计风格类型"""
     style_keywords = {
@@ -73,6 +81,80 @@ def _detect_room_type(user_input: str) -> str:
             if kw in user_input:
                 return room
     return "客厅"  # 默认
+
+
+def _fallback_prompt_bundle(user_input: str, style: str | None, room: str, reason: str) -> dict:
+    """
+    LLM 不可用时的本地兜底输出。
+    这样演示现场即使没有 API Key，也能继续调 ComfyUI 生成图片。
+    """
+    room_prompt = {
+        "客厅": "living room, sofa area, coffee table, large window, balanced layout",
+        "卧室": "bedroom, bed with headboard, nightstands, soft bedding, calm atmosphere",
+        "餐厅": "dining room, dining table, chairs, pendant lamp, warm gathering space",
+        "厨房": "kitchen, cabinetry, countertop, clean functional layout, natural light",
+        "书房": "study room, desk, bookshelves, reading corner, focused atmosphere",
+        "卫生间": "bathroom, vanity, mirror, shower area, spa-like clean design",
+    }.get(room, "interior space, balanced furniture layout")
+
+    style_name = {
+        "wabisabi": "wabi-sabi",
+        "french_cream": "french cream",
+        "minimalist": "minimalist",
+        "modern_luxury": "modern luxury",
+        "scandinavian": "scandinavian natural",
+    }.get(style, "contemporary")
+
+    negative_boost = STYLE_PRESETS.get(style or "", {}).get("negative_boost", "")
+
+    positive = (
+        f"{style_name} interior, {room_prompt}, {user_input}, professional interior rendering, "
+        "wide angle view, realistic material texture, soft natural light, detailed furniture, "
+        "architectural visualization, high quality, photorealistic"
+    )
+    negative = f"{negative_boost}, {BASE_NEGATIVE_PROMPT}" if negative_boost else BASE_NEGATIVE_PROMPT
+
+    return {
+        "positive": positive,
+        "negative": negative,
+        "cfg_scale": 7.0,
+        "steps": 24,
+        "sampler": "euler_ancestral",
+        "analysis": (
+            f"LLM 未启用，已使用本地兜底模板生成提示词。原因：{reason}。"
+            f"当前方案按「{style_name}」和「{room}」组织空间、材质、灯光与相机视角，"
+            "可用于现场演示 ComfyUI 出图链路。"
+        ),
+        "coohom_brief": (
+            f"Room type: {room}\n"
+            f"Target style: {style_name}\n"
+            f"Area and layout: Extract from user request: {user_input}\n"
+            "Key furniture: Main furniture first, then lighting, rug, decor and plants\n"
+            "Material palette: Match style tags, keep wood/fabric/stone/metal consistent\n"
+            "Lighting setup: Soft ambient light plus accent light, avoid overexposure\n"
+            "Camera angle: 24-35mm wide angle, eye level 1.2m-1.5m\n"
+            "Render notes: Check furniture scale, vertical lines, material realism and focal point"
+        ),
+        "asset_tags": (
+            f"Category: interior scene, furniture set\n"
+            f"Room: {room}\n"
+            f"Style tags: {style_name}, interior design, AI rendering\n"
+            "Material tags: wood, fabric, wall finish, lighting, decor\n"
+            "Color tags: warm neutral, cream, greige, natural tone\n"
+            f"Coohom keywords: {style_name} {room}, sofa, lighting, rug, decor, natural material\n"
+            "Quality notes: Check scale, texture clarity, no watermark, reusable asset naming"
+        ),
+        "social_copy": (
+            f"Title: {style_name.title()} {room} Concept\n"
+            f"Caption: A {style_name} {room} concept generated from an AI-assisted design brief, "
+            "focused on natural materials, balanced lighting and a calm spatial mood.\n"
+            f"Hashtags: #{style_name.replace(' ', '')} #{room} #interiordesign #aiinterior #coohom\n"
+            "Short video script: Show final render first, then reveal the user brief, material palette, "
+            "lighting setup, camera angle, and final reusable design tags."
+        ),
+        "raw_llm_response": f"LLM fallback used: {reason}",
+        "llm_warning": reason,
+    }
 
 
 def _query_rag(user_input: str, style: str | None, top_k: int = 5) -> str:
@@ -222,37 +304,31 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
         lora_strength=lora_info.get("lora_strength", "N/A"),
     )
 
-    try:
-        client = _get_llm_client()
-        response = client.chat.completions.create(
-            model=LLM_CONFIG["model"],
-            messages=[
-                {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=LLM_CONFIG["temperature"],
-            max_tokens=LLM_CONFIG["max_tokens"],
-        )
-        llm_output = response.choices[0].message.content
-    except Exception as e:
-        print(f"  ❌ LLM 调用失败: {e}")
-        return {
-            "user_input": user_input,
-            "detected_style": style,
-            "detected_room": room,
-            "rag_context": rag_context,
-            "error": f"LLM 调用失败: {e}",
-            "positive_prompt": "",
-            "negative_prompt": "",
-            "params": {},
-            "analysis": "",
-            "coohom_brief": "",
-            "asset_tags": "",
-            "social_copy": "",
-            "image": None,
-        }
-
-    parsed = _parse_llm_response(llm_output)
+    llm_warning = ""
+    if _should_use_llm():
+        try:
+            client = _get_llm_client()
+            response = client.chat.completions.create(
+                model=LLM_CONFIG["model"],
+                messages=[
+                    {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=LLM_CONFIG["temperature"],
+                max_tokens=LLM_CONFIG["max_tokens"],
+            )
+            llm_output = response.choices[0].message.content
+            parsed = _parse_llm_response(llm_output)
+        except Exception as e:
+            llm_warning = f"LLM 调用失败，已切换本地兜底模板：{e}"
+            print(f"  ⚠️ {llm_warning}")
+            parsed = _fallback_prompt_bundle(user_input, style, room, llm_warning)
+            llm_output = parsed["raw_llm_response"]
+    else:
+        llm_warning = "未检测到 LLM_API_KEY，已切换本地兜底模板"
+        print(f"  ⚠️ {llm_warning}")
+        parsed = _fallback_prompt_bundle(user_input, style, room, llm_warning)
+        llm_output = parsed["raw_llm_response"]
 
     # 如果检测到风格，追加风格预设增强提示词质量
     if style and style in STYLE_PRESETS:
@@ -287,6 +363,7 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
         "social_copy": parsed["social_copy"],
         "image": None,
         "raw_llm_response": llm_output,
+        "llm_warning": llm_warning,
     }
 
     # Step 4: 图像生成

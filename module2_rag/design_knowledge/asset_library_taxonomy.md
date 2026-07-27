@@ -30,6 +30,3 @@
 - 极简无主灯：minimalist, microcement, magnetic track light, hidden storage, linear light。
 - 现代轻奢：modern luxury, marble, brushed brass, leather, glass, warm grey。
 - 北欧自然风：scandinavian, oak wood, cotton linen, rattan, soft white, indoor plants。
-
-## 面试展示话术
-这个模块对应 JD 中的“模型素材库扩充”。可以强调自己不只是生成图片，还能把模型素材整理成可搜索、可运营、可复用的资产体系。

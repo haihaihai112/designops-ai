@@ -16,7 +16,7 @@ from pathlib import Path
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 from config import EMBEDDING_CONFIG, CHROMA_CONFIG, PROJECT_ROOT
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # ✅ 修正此处
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 import chromadb
 from tqdm import tqdm

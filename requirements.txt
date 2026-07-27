@@ -9,7 +9,6 @@ sentence-transformers>=2.7.0
 
 # --- Agent 编排 ---
 openai>=1.30.0           # 兼容 DeepSeek / Qwen / Ollama 接口
-langchain>=0.2.0         # 文档切片用
 langchain-text-splitters>=0.2.0
 
 # --- Web 界面 ---
