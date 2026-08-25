@@ -41,6 +41,7 @@ outputs/
 !outputs/interior_design_00010_.png
 chroma_db/
 *.sqlite3
+data/
 
 # ==================== 临时文件 ====================
 *.log

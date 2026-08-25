@@ -19,9 +19,6 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import EMBEDDING_CONFIG, CHROMA_CONFIG
-from sentence_transformers import SentenceTransformer
-import chromadb
-
 # 全局缓存，避免每次查询都重新加载
 _embedding_model = None
 _chroma_collection = None
@@ -30,6 +27,8 @@ _chroma_collection = None
 def _get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+
         _embedding_model = SentenceTransformer(
             EMBEDDING_CONFIG["model_name"],
             device=EMBEDDING_CONFIG["device"],
@@ -41,6 +40,8 @@ def _get_embedding_model():
 def _get_collection():
     global _chroma_collection
     if _chroma_collection is None:
+        import chromadb
+
         client = chromadb.PersistentClient(path=CHROMA_CONFIG["persist_directory"])
         _chroma_collection = client.get_collection(CHROMA_CONFIG["collection_name"])
     return _chroma_collection
@@ -96,6 +97,19 @@ def format_results(query: str, results: list[dict]) -> str:
         lines.append(r["text"][:300])  # 截断过长内容
         lines.append("")
     return "\n".join(lines)
+
+
+def build_citations(results: list[dict]) -> list[dict]:
+    """Return compact citation records that can be persisted and rendered by the UI."""
+    citations = []
+    for index, result in enumerate(results, 1):
+        citations.append({
+            "index": index,
+            "source": result["source"],
+            "excerpt": result["text"][:240].strip(),
+            "distance": round(result["distance"], 4) if result["distance"] is not None else None,
+        })
+    return citations
 
 
 # CLI 入口

@@ -1,579 +1,448 @@
-"""
-Module 4: 室内设计 AI Agent —— Gradio 端到端 Demo（UI 全面优化版）
+"""DesignOps AI model operations workbench."""
 
-启动方式：
-    python app.py
+from __future__ import annotations
 
-然后在浏览器打开 http://127.0.0.1:7860
-
-功能：
-    - 左侧：输入设计需求（中文）
-    - 右侧：展示生成效果（提示词 + 设计分析 + 图片）
-    - 中间展示 Agent 推理过程
-"""
-
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gradio as gr
-from config import COMFYUI_CONFIG
+
+from config import COMFYUI_CONFIG, PROJECT_ROOT
 from module3_agent.agent_pipeline import run_agent
 from module3_agent.comfyui_client import check_comfyui_available
+from module3_agent.requirement_parser import parse_design_requirement
+from module5_ops.report import VARIANT_LABELS, export_project_report
+from module5_ops.store import (
+    add_candidate,
+    create_project,
+    dashboard_metrics,
+    get_candidate,
+    get_project,
+    init_db,
+    list_projects,
+    save_feedback,
+    seed_legacy_batch,
+)
 
 
-def process_design_request(user_input: str, enable_image_gen: bool = True):
-    """
-    Gradio 回调函数：处理用户输入，返回 Agent 的完整输出。
-    """
-    if not user_input or not user_input.strip():
-        yield "请输入设计需求", "", "", "", "", "", None
-        return
+init_db()
+seed_legacy_batch()
 
-    # 先展示思考中状态
-    yield "🤔 正在分析需求...", "", "", "", "", "", None
+VARIANTS = ["balanced", "creative", "practical"]
+CATEGORY_LABELS = {
+    "materials": "材质", "lighting": "灯光", "furniture": "家具",
+    "layout": "布局", "mood": "氛围", "colors": "配色",
+}
 
-    # 运行 Agent
-    result = run_agent(user_input, generate=enable_image_gen)
 
-    # 构建过程展示
-    process_text = f"""
-### 🔍 意图识别
-**检测到风格**: {result.get('detected_style') or '未识别（使用通用模板）'}
-**检测到房间类型**: {result.get('detected_room', '未知')}
+def _structured_markdown(parsed: dict) -> str:
+    area = f"{parsed['area_sqm']:g} ㎡" if parsed.get("area_sqm") is not None else "未指定"
+    lines = [
+        "### 结构化 Brief",
+        f"**{parsed.get('style_name', '未指定')} · {parsed.get('room', '未指定')} · {area}**",
+        f"需求完整度：`{parsed.get('completeness', 0)}%`",
+    ]
+    for category, values in parsed.get("constraints", {}).items():
+        if values:
+            lines.append(f"**{CATEGORY_LABELS.get(category, category)}**：{'、'.join(values)}")
+    return "\n\n".join(lines)
 
-### 📚 RAG 知识库检索
-{result.get('rag_context', '无检索结果')}
 
-### 🤖 LLM 原始输出
-```
-{result.get('raw_llm_response', '无')[:800]}
-```
-"""
+def _citation_markdown(result: dict) -> str:
+    citations = result.get("rag_citations", [])
+    warning = result.get("rag_warning", "")
+    lines = ["### 知识依据"]
+    if warning:
+        lines.append(f"> {warning}")
+    if not citations:
+        lines.append("本次方案未记录知识库引用。")
+    for citation in citations:
+        distance = citation.get("distance")
+        score = f"距离 {distance:.4f}" if isinstance(distance, (int, float)) else "距离未知"
+        lines.append(
+            f"**[{citation['index']}] {citation['source']}** · {score}\n\n"
+            f"{citation['excerpt']}"
+        )
+    return "\n\n".join(lines)
 
-    # 构建提示词展示
-    prompt_text = f"""### ✅ 正向提示词
-```
+
+def _candidate_markdown(candidate: dict) -> str:
+    result = candidate["result"]
+    quality = result.get("quality", {})
+    timings = result.get("timings", {})
+    notes = "；".join(quality.get("notes", [])) or "暂无诊断"
+    params = result.get("params", {})
+    selected = " · **已采用**" if candidate.get("selected") else ""
+    return f"""### V{candidate['version']} · {VARIANT_LABELS.get(candidate['variant'], candidate['variant'])}{selected}
+
+**自动质量分 `{quality.get('overall', 0)}`** / 100<br>
+需求覆盖 {quality.get('requirement_coverage', 0)} · 意图一致 {quality.get('intent_alignment', 0)} · 交付完整 {quality.get('deliverable_completeness', 0)} · Prompt 质量 {quality.get('prompt_quality', 0)}
+
+生成模式：`{candidate.get('generation_mode', 'unknown')}` · 总耗时：`{timings.get('total', candidate.get('duration_seconds', 0))}s` · CFG `{params.get('cfg_scale', '-')}` · Steps `{params.get('steps', '-')}`
+
+**质量诊断**：{notes}
+
+#### 正向提示词
+```text
 {result.get('positive_prompt', '')}
 ```
 
-### ❌ 反向提示词
-```
-{result.get('negative_prompt', '')}
+#### 设计分析
+{result.get('analysis', '') or '无'}
+
+#### Coohom Brief
+```text
+{result.get('coohom_brief', '') or '无'}
 ```
 
-### ⚙️ 生成参数
-- **CFG Scale**: {result['params'].get('cfg_scale', 7.0)}
-- **Steps**: {result['params'].get('steps', 30)}
-- **Sampler**: {result['params'].get('sampler', 'euler_ancestral')}
-"""
+#### 素材标签与发布包
+```text
+{result.get('asset_tags', '') or '无'}
 
-    # 设计分析
-    analysis = result.get("analysis", "")
-    coohom_brief = f"""### 🧩 酷家乐 / Coohom 执行 Brief
-```
-{result.get('coohom_brief', '无')}
-```
-"""
-    asset_tags = f"""### 🗂 模型素材库标签
-```
-{result.get('asset_tags', '无')}
-```
-"""
-    social_copy = f"""### 📣 内容发布包
-```
-{result.get('social_copy', '无')}
+{result.get('social_copy', '') or '无'}
 ```
 """
 
-    # 图像
-    image = None
-    if enable_image_gen and result.get("image"):
-        img_result = result["image"]
-        if img_result.get("success") and img_result.get("image_path"):
-            image = img_result["image_path"]
-        elif img_result.get("error"):
-            process_text += f"\n\n### ⚠️ 图像生成\n{img_result['error']}"
-    elif enable_image_gen:
-        process_text += "\n\n### ⚠️ 图像生成\nComfyUI 未运行或生成失败"
 
-    yield process_text, prompt_text, analysis, coohom_brief, asset_tags, social_copy, image
+def _candidate_rows(project: dict) -> list[list]:
+    return [
+        [
+            candidate["id"],
+            f"V{candidate['version']}",
+            VARIANT_LABELS.get(candidate["variant"], candidate["variant"]),
+            candidate.get("auto_score") or 0,
+            candidate.get("human_score") or "-",
+            candidate.get("generation_mode", "unknown"),
+            round(candidate.get("duration_seconds") or 0, 2),
+            "已采用" if candidate.get("selected") else "待评估",
+        ]
+        for candidate in project.get("candidates", [])
+    ]
 
 
-# ==================== Gradio UI ====================
+def _candidate_choices(project: dict) -> list[tuple[str, str]]:
+    return [
+        (
+            f"V{candidate['version']} · {VARIANT_LABELS.get(candidate['variant'], candidate['variant'])} · {candidate.get('auto_score') or 0}分",
+            str(candidate["id"]),
+        )
+        for candidate in project.get("candidates", [])
+    ]
 
-CUSTOM_CSS = """
-/* ===== 全局风格：温暖、安静、有呼吸感的室内设计调性 ===== */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600;700&display=swap');
 
-.gradio-container {
-    max-width: 1480px !important;
-    margin: 0 auto !important;
-    background: #F8F6F3 !important;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
-}
+def _project_choices() -> list[tuple[str, str]]:
+    return [
+        (f"#{item['id']} · {item['name']} · {item['candidate_count']} 个候选", str(item["id"]))
+        for item in list_projects()
+    ]
 
-/* ===== 顶部横幅 ===== */
-.header-section {
-    background: linear-gradient(165deg, #2D2A24 0%, #3D3830 50%, #4A443C 100%);
-    border-radius: 20px;
-    padding: 40px 48px 36px;
-    margin: 16px 0 24px;
-    position: relative;
-    overflow: hidden;
-}
-.header-section::before {
-    content: '';
-    position: absolute;
-    top: -50%;
-    right: -10%;
-    width: 400px;
-    height: 400px;
-    background: radial-gradient(circle, rgba(200,180,160,0.06) 0%, transparent 70%);
-    border-radius: 50%;
-}
-.header-section::after {
-    content: '';
-    position: absolute;
-    bottom: -30%;
-    left: 20%;
-    width: 300px;
-    height: 300px;
-    background: radial-gradient(circle, rgba(180,200,180,0.04) 0%, transparent 70%);
-    border-radius: 50%;
-}
-.header-section h1 {
-    font-family: 'Playfair Display', Georgia, serif;
-    font-size: 2.2em;
-    font-weight: 600;
-    color: #F5F0EB;
-    margin: 0 0 8px;
-    letter-spacing: -0.02em;
-    position: relative;
-}
-.header-section .subtitle {
-    font-size: 1em;
-    color: #C4BAB0;
-    font-weight: 300;
-    margin: 0 0 6px;
-    position: relative;
-}
-.header-section .style-tags {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-top: 16px;
-    position: relative;
-}
-.header-section .style-tag {
-    display: inline-block;
-    padding: 4px 14px;
-    border-radius: 20px;
-    font-size: 0.8em;
-    font-weight: 400;
-    background: rgba(245,240,235,0.1);
-    color: #C4BAB0;
-    border: 1px solid rgba(245,240,235,0.12);
-    letter-spacing: 0.02em;
-}
 
-/* ===== 输入区 ===== */
-.input-panel {
-    background: #FFFFFF;
-    border-radius: 16px;
-    padding: 24px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03);
-    height: 100%;
-}
-.input-panel label {
-    font-weight: 600 !important;
-    font-size: 0.9em !important;
-    color: #2D2A24 !important;
-    margin-bottom: 6px !important;
-}
-.input-panel textarea {
-    border-radius: 12px !important;
-    border: 1.5px solid #E8E3DD !important;
-    background: #FAF9F7 !important;
-    font-size: 0.95em !important;
-    line-height: 1.6 !important;
-    color: #2D2A24 !important;
-    padding: 14px 16px !important;
-    transition: border-color 0.2s, box-shadow 0.2s !important;
-    resize: vertical !important;
-}
-.input-panel textarea:focus {
-    border-color: #B8A89A !important;
-    box-shadow: 0 0 0 3px rgba(184,168,154,0.15) !important;
-}
+def _project_table() -> list[list]:
+    return [
+        [
+            item["id"], item["name"], item["status"], item["candidate_count"],
+            item.get("best_score") or 0, "是" if item.get("selected_count") else "否",
+            item["updated_at"].replace("T", " ")[:19],
+        ]
+        for item in list_projects()
+    ]
 
-/* ===== 主按钮 ===== */
-.primary-btn {
-    background: #2D2A24 !important;
-    border: none !important;
-    border-radius: 12px !important;
-    padding: 12px 32px !important;
-    font-weight: 500 !important;
-    font-size: 0.95em !important;
-    color: #F5F0EB !important;
-    transition: all 0.2s !important;
-    box-shadow: none !important;
-}
-.primary-btn:hover {
-    background: #3D3830 !important;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(45,42,36,0.2) !important;
-}
-.primary-btn:active {
-    transform: translateY(0);
-}
 
-/* ===== 复选框 ===== */
-.checkbox-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.checkbox-row label {
-    font-size: 0.85em !important;
-    color: #6B6560 !important;
-}
-
-/* ===== 输出卡片 ===== */
-.output-card {
-    background: #FFFFFF;
-    border-radius: 16px;
-    padding: 20px 24px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03);
-    margin-bottom: 16px;
-}
-
-/* ===== Tabs ===== */
-.tabs-container {
-    margin-bottom: 16px;
-}
-.tabs-container .tab-nav {
-    border-bottom: 1.5px solid #EDE9E4 !important;
-    margin-bottom: 0 !important;
-    padding: 0 4px !important;
-}
-.tabs-container button {
-    font-size: 0.85em !important;
-    font-weight: 500 !important;
-    color: #8A847E !important;
-    padding: 10px 20px !important;
-    border: none !important;
-    background: transparent !important;
-    border-bottom: 2px solid transparent !important;
-    margin-bottom: -1.5px !important;
-    transition: all 0.2s !important;
-}
-.tabs-container button.selected {
-    color: #2D2A24 !important;
-    border-bottom-color: #2D2A24 !important;
-    background: transparent !important;
-}
-.tabs-container button:hover {
-    color: #2D2A24 !important;
-    background: transparent !important;
-}
-.tab-content {
-    background: transparent !important;
-    padding: 16px 4px !important;
-    border: none !important;
-}
-
-/* ===== Markdown 输出（Agent 推理、提示词） ===== */
-.markdown-output {
-    font-size: 0.9em !important;
-    line-height: 1.7 !important;
-    color: #3D3830 !important;
-}
-.markdown-output h3 {
-    font-size: 1em !important;
-    font-weight: 600 !important;
-    color: #2D2A24 !important;
-    margin-top: 20px !important;
-    margin-bottom: 8px !important;
-    padding-bottom: 6px;
-    border-bottom: 1px solid #EDE9E4;
-}
-.markdown-output h3:first-child {
-    margin-top: 0 !important;
-}
-.markdown-output p {
-    margin: 4px 0 !important;
-}
-.markdown-output strong {
-    color: #2D2A24 !important;
-    font-weight: 600 !important;
-}
-.markdown-output code {
-    background: #F4F1ED !important;
-    border-radius: 6px !important;
-    padding: 2px 8px !important;
-    font-size: 0.85em !important;
-    color: #4A443C !important;
-}
-.markdown-output pre {
-    background: #F4F1ED !important;
-    border: 1px solid #E8E3DD !important;
-    border-radius: 10px !important;
-    padding: 16px !important;
-    margin: 8px 0 !important;
-    overflow-x: auto !important;
-}
-.markdown-output pre code {
-    background: none !important;
-    padding: 0 !important;
-    font-size: 0.82em !important;
-    line-height: 1.5 !important;
-}
-
-/* ===== 图像 ===== */
-.image-output {
-    border-radius: 12px !important;
-    overflow: hidden !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06) !important;
-    border: 1px solid #EDE9E4 !important;
-}
-
-/* ===== 示例按钮 ===== */
-.examples-section {
-    margin-top: 20px !important;
-}
-.examples-section .examples-title {
-    font-size: 0.8em !important;
-    color: #8A847E !important;
-    font-weight: 500 !important;
-    margin-bottom: 8px !important;
-}
-.gr-sample-btn {
-    background: #FFFFFF !important;
-    border: 1.5px solid #EDE9E4 !important;
-    border-radius: 10px !important;
-    padding: 10px 14px !important;
-    font-size: 0.82em !important;
-    color: #3D3830 !important;
-    line-height: 1.4 !important;
-    transition: all 0.2s !important;
-}
-.gr-sample-btn:hover {
-    border-color: #B8A89A !important;
-    background: #FAF9F7 !important;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.04) !important;
-}
-
-/* ===== 状态栏 ===== */
-.status-bar {
-    background: #FFFFFF;
-    border-radius: 12px;
-    padding: 12px 20px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    margin-top: 12px;
-    font-size: 0.8em !important;
-    color: #6B6560 !important;
-    line-height: 1.6 !important;
-}
-
-/* ===== 设计分析卡片 ===== */
-.analysis-section {
-    background: linear-gradient(135deg, #FAF9F7 0%, #F6F3EF 100%) !important;
-    border-radius: 12px !important;
-    padding: 16px 20px !important;
-    border: 1px solid #EDE9E4 !important;
-    margin-top: 16px !important;
-}
-.analysis-section label {
-    font-weight: 600 !important;
-    font-size: 0.85em !important;
-    color: #2D2A24 !important;
-}
-
-/* ===== 等待提示 ===== */
-.waiting-text {
-    color: #8A847E !important;
-    font-size: 0.9em !important;
-    font-style: italic !important;
-}
-
-/* ===== 响应式 ===== */
-@media (max-width: 768px) {
-    .header-section {
-        padding: 28px 24px;
-    }
-    .header-section h1 {
-        font-size: 1.6em;
-    }
-    .input-panel {
-        padding: 16px;
-    }
-}
-
-/* ===== 滚动条美化 ===== */
-::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-}
-::-webkit-scrollbar-track {
-    background: transparent;
-}
-::-webkit-scrollbar-thumb {
-    background: #D5CFC8;
-    border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: #B8A89A;
-}
-
-/* ===== 去除 Gradio 默认多余装饰 ===== */
-.gr-form, .gr-box {
-    border: none !important;
-    background: transparent !important;
-    box-shadow: none !important;
-}
-.gr-panel {
-    border: none !important;
-}
-footer {
-    display: none !important;
-}
-"""
-
-with gr.Blocks(title="室内设计 AI Agent") as demo:
-    # ===== 顶部横幅 =====
-    gr.HTML("""
-    <div class="header-section">
-        <h1>Atelier · 室内设计智能体</h1>
-        <p class="subtitle">LoRA 微调 + RAG 知识库 + Agent 编排 + ComfyUI 渲染 —— 端到端 AI 设计生成</p>
-        <div class="style-tags">
-            <span class="style-tag">侘寂风</span>
-            <span class="style-tag">法式奶油风</span>
-            <span class="style-tag">极简无主灯</span>
-        </div>
+def _dashboard_outputs():
+    metrics = dashboard_metrics()
+    metric_html = f"""
+    <div class="metric-grid">
+      <div class="metric"><span>项目</span><strong>{metrics.get('projects') or 0}</strong><small>累计设计任务</small></div>
+      <div class="metric"><span>候选</span><strong>{metrics.get('candidates') or 0}</strong><small>已记录版本</small></div>
+      <div class="metric"><span>自动质量</span><strong>{metrics.get('auto_score') or 0}</strong><small>平均 / 100</small></div>
+      <div class="metric"><span>人工评分</span><strong>{metrics.get('human_score') or '-'}</strong><small>{metrics.get('feedback_count') or 0} 条反馈</small></div>
+      <div class="metric"><span>采用率</span><strong>{metrics.get('adoption_rate') or 0}%</strong><small>候选采用占比</small></div>
+      <div class="metric warning"><span>兜底率</span><strong>{metrics.get('fallback_rate') or 0}%</strong><small>离线模板占比</small></div>
     </div>
-    """)
+    """
+    recent = [
+        [
+            item["id"], item["name"], f"V{item['version']}",
+            VARIANT_LABELS.get(item["variant"], item["variant"]),
+            item.get("auto_score") or 0, item["generation_mode"],
+            round(item.get("duration_seconds") or 0, 2),
+            "已采用" if item.get("selected") else "-",
+        ]
+        for item in metrics["recent"]
+    ]
+    styles = [[style, count] for style, count in sorted(metrics["styles"].items(), key=lambda item: -item[1])]
+    decisions = [[item["decision"], item["count"]] for item in metrics["decisions"]]
+    return metric_html, recent, styles, decisions
 
-    with gr.Row(equal_height=False):
-        # ===== 左侧面板：输入区 =====
-        with gr.Column(scale=3, min_width=320):
-            with gr.Column(elem_classes="input-panel"):
-                gr.HTML("""
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                    <span style="font-size:1.1em;">✏️</span>
-                    <span style="font-weight:600;font-size:0.9em;color:#2D2A24;">设计需求</span>
-                </div>
-                """)
-                user_input = gr.Textbox(
-                    label="",
-                    placeholder="例如：设计一个20平米的侘寂风客厅，需要带落地窗，空间要有呼吸感...",
-                    lines=5,
-                )
 
-                with gr.Row():
-                    enable_image = gr.Checkbox(
-                        label="🖼 启用图像生成（需要 ComfyUI 运行中）",
-                        value=True,
-                    )
-                    submit_btn = gr.Button("🎨 开始设计", elem_classes="primary-btn")
+def generate_candidates(project_name: str, user_input: str, candidate_count: int, enable_image: bool):
+    if not user_input or not user_input.strip():
+        raise gr.Error("请输入完整的空间设计需求")
 
-            # 设计分析
-            analysis_output = gr.Markdown(
-                elem_classes="analysis-section",
-                label=None,
-                value="",
-            )
+    parsed = parse_design_requirement(user_input)
+    name = project_name.strip() or f"{parsed['style_name']} · {parsed['room']}"
+    variants = VARIANTS if int(candidate_count) == 3 else ["balanced"]
+    errors = []
+    generated_results = []
 
-        # ===== 右侧面板：输出区 =====
-        with gr.Column(scale=5, min_width=480):
-            with gr.Column(elem_classes="tabs-container"):
-                with gr.Tabs():
-                    with gr.TabItem("🔬 Agent 推理过程"):
-                        process_output = gr.Markdown(
-                            elem_classes="markdown-output",
-                            value="<span class='waiting-text'>输入设计需求后点击「开始设计」...</span>",
-                        )
-                    with gr.TabItem("🎯 生成提示词"):
-                        prompt_output = gr.Markdown(
-                            elem_classes="markdown-output",
-                            value="<span class='waiting-text'>等待生成...</span>",
-                        )
-                    with gr.TabItem("🧩 Coohom Brief"):
-                        coohom_output = gr.Markdown(
-                            elem_classes="markdown-output",
-                            value="<span class='waiting-text'>等待生成...</span>",
-                        )
-                    with gr.TabItem("🗂 素材标签"):
-                        asset_output = gr.Markdown(
-                            elem_classes="markdown-output",
-                            value="<span class='waiting-text'>等待生成...</span>",
-                        )
-                    with gr.TabItem("📣 发布内容"):
-                        social_output = gr.Markdown(
-                            elem_classes="markdown-output",
-                            value="<span class='waiting-text'>等待生成...</span>",
-                        )
+    for variant in variants:
+        try:
+            result = run_agent(user_input.strip(), generate=enable_image, variant=variant)
+            generated_results.append(result)
+        except Exception as exc:
+            errors.append(f"{VARIANT_LABELS[variant]}：{exc}")
 
-            image_output = gr.Image(
-                label=None,
-                type="filepath",
-                height=400,
-                elem_classes="image-output",
-                show_label=False,
-            )
+    if not generated_results:
+        raise gr.Error("本轮没有生成可保存的候选方案：" + "；".join(errors))
 
-    # ===== 示例 =====
-    gr.HTML("""
-    <div class="examples-section">
-        <div class="examples-title">💡 试试这些示例</div>
-    </div>
-    """)
-    gr.Examples(
-        examples=[
-            ["设计一个20平米的侘寂风客厅，带落地窗，空间要有呼吸感，低矮家具，亚麻材质"],
-            ["设计一个15平米的法式奶油风卧室，要有拱门元素，奶油色床品，石膏线装饰"],
-            ["设计一个30平米的极简无主灯客厅，微水泥墙面，磁吸轨道灯，干净利落"],
-            ["设计一个10平米的侘寂风书房，原木书架，纸灯，留白充足"],
-        ],
-        inputs=user_input,
-        label=None,
+    project_id = create_project(name, user_input.strip(), parsed)
+    for result in generated_results:
+        add_candidate(project_id, result)
+    project = get_project(project_id)
+
+    first = project["candidates"][0]
+    first_result = first["result"]
+    image = first.get("image_path") if first.get("image_path") and Path(first["image_path"]).exists() else None
+    status = f"已创建项目 `#{project_id}`，生成 {len(project['candidates'])} 个候选。"
+    if errors:
+        status += "\n\n> 部分候选失败：" + "；".join(errors)
+    choices = _candidate_choices(project)
+    return (
+        status,
+        _structured_markdown(parsed),
+        _candidate_rows(project),
+        gr.Dropdown(choices=choices, value=str(first["id"])),
+        _candidate_markdown(first),
+        _citation_markdown(first_result),
+        image,
+        str(first["id"]),
+        gr.Dropdown(choices=_project_choices(), value=str(project_id)),
+        _candidate_rows(project),
+        *_dashboard_outputs(),
     )
 
-    # ===== 状态栏 =====
-    comfyui_status = "🟢 ComfyUI 已连接" if check_comfyui_available() else "🔴 ComfyUI 未运行"
+
+def show_candidate(candidate_id: str):
+    if not candidate_id:
+        return "请选择候选方案", "", None, ""
+    candidate = get_candidate(int(candidate_id))
+    if not candidate:
+        return "候选方案不存在", "", None, ""
+    image = candidate.get("image_path")
+    if image and not Path(image).exists():
+        image = None
+    return _candidate_markdown(candidate), _citation_markdown(candidate["result"]), image, str(candidate["id"])
+
+
+def submit_feedback(candidate_id: str, requirement_score: int, visual_score: int, feasibility_score: int, decision: str, notes: str):
+    if not candidate_id:
+        raise gr.Error("请先选择一个候选方案")
+    save_feedback(
+        int(candidate_id), int(requirement_score), int(visual_score),
+        int(feasibility_score), decision, notes,
+    )
+    candidate = get_candidate(int(candidate_id))
+    project = get_project(candidate["project_id"])
+    return (
+        f"反馈已保存：**{decision}** · 综合人工评分 `{(requirement_score + visual_score + feasibility_score) / 3:.1f}` / 5",
+        _candidate_rows(project),
+        _candidate_rows(project),
+        *_dashboard_outputs(),
+    )
+
+
+def refresh_projects():
+    choices = _project_choices()
+    value = choices[0][1] if choices else None
+    project = get_project(int(value)) if value else None
+    return gr.Dropdown(choices=choices, value=value), _candidate_rows(project) if project else []
+
+
+def load_project(project_id: str):
+    if not project_id:
+        return "请选择项目", [], [], gr.Dropdown(choices=[], value=None)
+    project = get_project(int(project_id))
+    if not project:
+        return "项目不存在", [], [], gr.Dropdown(choices=[], value=None)
+    gallery = []
+    for candidate in project["candidates"]:
+        path = candidate.get("image_path")
+        if path and Path(path).exists():
+            gallery.append((path, f"V{candidate['version']} · {VARIANT_LABELS.get(candidate['variant'], candidate['variant'])}"))
+    adopted = next((item for item in project["candidates"] if item.get("selected")), None)
+    summary = f"""### #{project['id']} · {project['name']}
+
+{project['requirement']}
+
+状态：`{project['status']}` · 候选：`{len(project['candidates'])}` · 已采用：`{'V' + str(adopted['version']) if adopted else '无'}` · 更新：`{project['updated_at'].replace('T', ' ')[:19]}`
+"""
+    choices = _candidate_choices(project)
+    value = choices[0][1] if choices else None
+    return summary, _candidate_rows(project), gallery, gr.Dropdown(choices=choices, value=value)
+
+
+def export_report(project_id: str):
+    if not project_id:
+        raise gr.Error("请先选择项目")
+    path = export_project_report(int(project_id))
+    return str(path), f"报告已导出：`{path.name}`"
+
+
+def refresh_dashboard():
+    return _dashboard_outputs()
+
+
+CUSTOM_CSS = """
+:root { --ink:#202624; --muted:#68716d; --line:#dfe4e1; --paper:#ffffff; --canvas:#f3f5f3; --green:#246b52; --amber:#9a651c; }
+.gradio-container { max-width: 1480px !important; margin:0 auto !important; background:var(--canvas) !important; color:var(--ink) !important; }
+.app-header { background:#202624; color:white; padding:22px 26px; border-radius:6px; margin:14px 0 12px; display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
+.app-header h1 { font-size:24px; margin:0 0 4px; letter-spacing:0; color:#ffffff !important; }
+.app-header p { margin:0; color:#bac3bf; font-size:14px; }
+.system-state { color:#d7e9df; font-size:13px; white-space:nowrap; }
+.workspace-panel { background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:16px; }
+.section-title { font-size:13px; font-weight:700; color:var(--muted); text-transform:uppercase; margin:0 0 10px; }
+.metric-grid { display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); gap:10px; margin-bottom:14px; }
+.metric { background:white; border:1px solid var(--line); border-top:3px solid var(--green); border-radius:6px; padding:14px; min-height:104px; }
+.metric.warning { border-top-color:var(--amber); }
+.metric span,.metric small { display:block; color:var(--muted); font-size:12px; }
+.metric strong { display:block; font-size:26px; margin:8px 0 3px; letter-spacing:0; }
+.primary-btn { background:var(--green) !important; color:white !important; border-color:var(--green) !important; }
+.subtle-note { font-size:12px; color:var(--muted); }
+.markdown-body pre { max-height:260px; overflow:auto; border-radius:4px !important; }
+.gallery-shell { min-height:300px; }
+.candidate-grid { overflow-x:auto !important; }
+.candidate-grid table { min-width:680px !important; }
+.candidate-grid th,.candidate-grid td { white-space:nowrap !important; font-size:12px !important; }
+.tab-nav { border-bottom:1px solid var(--line) !important; }
+footer { display:none !important; }
+@media (max-width:1000px) { .metric-grid { grid-template-columns:repeat(3,1fr); } .app-header { align-items:flex-start; flex-direction:column; } }
+@media (max-width:640px) { .metric-grid { grid-template-columns:repeat(2,1fr); } .app-header { padding:18px; } }
+"""
+
+
+with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
+    comfy_state = "ComfyUI 已连接" if check_comfyui_available() else "ComfyUI 离线 · 文本链路可用"
     gr.HTML(f"""
-    <div class="status-bar">
-        <strong>系统状态</strong> &nbsp;·&nbsp; {comfyui_status}
-        &nbsp;·&nbsp; ComfyUI: <code>{COMFYUI_CONFIG['api_base']}</code>
-        &nbsp;·&nbsp; 知识库: ChromaDB (bge-small-zh)
-        &nbsp;·&nbsp; LLM: DeepSeek / Ollama
-    </div>
+    <header class="app-header">
+      <div><h1 style="color:#ffffff">DesignOps AI</h1><p>室内设计模型运营工作台 · 生成、评估、反馈与版本追踪</p></div>
+      <div class="system-state">{comfy_state}</div>
+    </header>
     """)
 
-    # ===== 事件绑定 =====
-    submit_btn.click(
-        fn=process_design_request,
-        inputs=[user_input, enable_image],
-        outputs=[
-            process_output,
-            prompt_output,
-            analysis_output,
-            coohom_output,
-            asset_output,
-            social_output,
-            image_output,
-        ],
+    current_candidate = gr.State("")
+
+    with gr.Tabs():
+        with gr.Tab("设计台"):
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=4, min_width=320, elem_classes="workspace-panel"):
+                    gr.HTML('<div class="section-title">任务配置</div>')
+                    project_name = gr.Textbox(label="项目名称", placeholder="例如：杭州住宅客厅改造")
+                    user_input = gr.Textbox(
+                        label="空间需求",
+                        placeholder="描述空间、面积、风格、材质、灯光、家具和目标氛围",
+                        lines=7,
+                    )
+                    with gr.Row():
+                        candidate_count = gr.Radio([1, 3], value=3, label="候选数量")
+                        enable_image = gr.Checkbox(value=False, label="调用 ComfyUI 出图")
+                    generate_btn = gr.Button("生成并记录候选", variant="primary", elem_classes="primary-btn")
+                    generation_status = gr.Markdown("等待创建任务。", elem_classes="subtle-note")
+                    structured_output = gr.Markdown("", elem_classes="markdown-body")
+
+                with gr.Column(scale=7, min_width=520):
+                    candidate_table = gr.Dataframe(
+                        headers=["ID", "版本", "策略", "自动分", "人工分", "模式", "耗时(s)", "状态"],
+                        datatype=["number", "str", "str", "number", "str", "str", "number", "str"],
+                        value=[], interactive=False, wrap=False, label="候选对比", elem_classes="candidate-grid",
+                    )
+                    candidate_select = gr.Dropdown(label="查看候选", choices=[])
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=5):
+                            candidate_image = gr.Image(label="渲染结果", type="filepath", height=360)
+                        with gr.Column(scale=6):
+                            candidate_detail = gr.Markdown("选择候选后查看详情。", elem_classes="markdown-body")
+                    citation_output = gr.Markdown("", elem_classes="markdown-body")
+
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=8, elem_classes="workspace-panel"):
+                    gr.HTML('<div class="section-title">人工评估</div>')
+                    with gr.Row():
+                        requirement_score = gr.Slider(1, 5, value=4, step=1, label="需求符合度")
+                        visual_score = gr.Slider(1, 5, value=4, step=1, label="视觉质量")
+                        feasibility_score = gr.Slider(1, 5, value=4, step=1, label="落地可行性")
+                    with gr.Row():
+                        decision = gr.Radio(["采用", "保留", "淘汰"], value="保留", label="决策")
+                        feedback_notes = gr.Textbox(label="评语", placeholder="记录采用原因或失败模式")
+                    feedback_btn = gr.Button("保存评估")
+                    feedback_status = gr.Markdown("")
+
+        with gr.Tab("项目库"):
+            with gr.Row():
+                project_select = gr.Dropdown(label="项目", choices=_project_choices(), scale=5)
+                refresh_projects_btn = gr.Button("刷新", scale=1)
+                export_btn = gr.Button("导出报告", scale=1)
+            project_summary = gr.Markdown("选择项目查看历史版本。")
+            history_table = gr.Dataframe(
+                headers=["ID", "版本", "策略", "自动分", "人工分", "模式", "耗时(s)", "状态"],
+                datatype=["number", "str", "str", "number", "str", "str", "number", "str"],
+                value=[], interactive=False, wrap=False, label="项目版本", elem_classes="candidate-grid",
+            )
+            history_gallery = gr.Gallery(label="方案画廊", columns=3, height=420, object_fit="contain", elem_classes="gallery-shell")
+            report_file = gr.File(label="项目报告", interactive=False)
+            report_status = gr.Markdown("")
+
+        with gr.Tab("运营看板"):
+            metric_html, recent_rows, style_rows, decision_rows = _dashboard_outputs()
+            dashboard_metrics_html = gr.HTML(metric_html)
+            refresh_dashboard_btn = gr.Button("刷新指标")
+            recent_table = gr.Dataframe(
+                headers=["候选ID", "项目", "版本", "策略", "自动分", "模式", "耗时(s)", "采用"],
+                value=recent_rows, interactive=False, wrap=False, label="最近运行", elem_classes="candidate-grid",
+            )
+            with gr.Row():
+                style_table = gr.Dataframe(headers=["风格", "项目数"], value=style_rows, interactive=False, label="风格分布")
+                decision_table = gr.Dataframe(headers=["评估决策", "次数"], value=decision_rows, interactive=False, label="反馈决策")
+
+    generation_outputs = [
+        generation_status, structured_output, candidate_table, candidate_select,
+        candidate_detail, citation_output, candidate_image, current_candidate,
+        project_select, history_table, dashboard_metrics_html, recent_table,
+        style_table, decision_table,
+    ]
+    generate_btn.click(
+        generate_candidates,
+        [project_name, user_input, candidate_count, enable_image],
+        generation_outputs,
+    )
+    candidate_select.change(
+        show_candidate,
+        candidate_select,
+        [candidate_detail, citation_output, candidate_image, current_candidate],
+    )
+    feedback_btn.click(
+        submit_feedback,
+        [current_candidate, requirement_score, visual_score, feasibility_score, decision, feedback_notes],
+        [feedback_status, candidate_table, history_table, dashboard_metrics_html, recent_table, style_table, decision_table],
+    )
+    refresh_projects_btn.click(refresh_projects, outputs=[project_select, history_table])
+    project_select.change(load_project, project_select, [project_summary, history_table, history_gallery, candidate_select])
+    export_btn.click(export_report, project_select, [report_file, report_status])
+    refresh_dashboard_btn.click(
+        refresh_dashboard,
+        outputs=[dashboard_metrics_html, recent_table, style_table, decision_table],
     )
 
 
 if __name__ == "__main__":
-    from config import COMFYUI_CONFIG as _cfg
-    demo.launch(
+    demo.queue(default_concurrency_limit=2).launch(
         server_name="127.0.0.1",
-        server_port=7860,
+        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
         share=False,
+        allowed_paths=[COMFYUI_CONFIG["output_dir"], str(PROJECT_ROOT / "outputs" / "reports")],
+        footer_links=[],
         css=CUSTOM_CSS,
-        theme=gr.themes.Soft(),
-        allowed_paths=[_cfg["output_dir"]],
+        theme=gr.themes.Base(),
     )

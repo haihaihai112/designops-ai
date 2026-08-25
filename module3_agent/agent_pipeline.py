@@ -13,23 +13,22 @@
 
 import re
 import sys
-import io
+import time
+from functools import lru_cache
 from pathlib import Path
-
-# 修复 Windows GBK 环境下 emoji 打印导致的 UnicodeEncodeError
-if hasattr(sys.stdout, 'buffer'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import LLM_CONFIG, LORA_CONFIG
-from module2_rag.query_knowledge import query_design_knowledge, format_results
+from module2_rag.query_knowledge import build_citations, query_design_knowledge, format_results
 from module3_agent.prompt_templates import (
     AGENT_SYSTEM_PROMPT,
     PROMPT_GENERATION_TEMPLATE,
     STYLE_PRESETS,
     BASE_NEGATIVE_PROMPT,
 )
+from module3_agent.quality_evaluator import evaluate_design_bundle
+from module3_agent.requirement_parser import format_structured_brief, parse_design_requirement
 from module3_agent.comfyui_client import generate_image, check_comfyui_available
 from openai import OpenAI
 
@@ -52,35 +51,12 @@ def _should_use_llm() -> bool:
 
 def _detect_style(user_input: str) -> str:
     """从用户输入中检测设计风格类型"""
-    style_keywords = {
-        "wabisabi": ["侘寂", "wabisabi", "wabi-sabi", "日式", "禅意"],
-        "french_cream": ["法式奶油", "奶油风", "法式", "french cream", "巴黎"],
-        "minimalist": ["极简", "无主灯", "简约", "minimalist", "现代简约"],
-        "modern_luxury": ["现代轻奢", "轻奢", "modern luxury", "quiet luxury", "大理石", "黄铜"],
-        "scandinavian": ["北欧", "scandinavian", "nordic", "原木", "自然风"],
-    }
-    for style, keywords in style_keywords.items():
-        for kw in keywords:
-            if kw.lower() in user_input.lower():
-                return style
-    return None
+    return parse_design_requirement(user_input)["style_code"]
 
 
 def _detect_room_type(user_input: str) -> str:
     """检测房间类型"""
-    room_keywords = {
-        "客厅": ["客厅", "起居室", "living room"],
-        "卧室": ["卧室", "主卧", "次卧", "bedroom"],
-        "餐厅": ["餐厅", "饭厅", "dining"],
-        "厨房": ["厨房", "kitchen"],
-        "书房": ["书房", "工作室", "study", "office"],
-        "卫生间": ["卫生间", "浴室", "bathroom"],
-    }
-    for room, keywords in room_keywords.items():
-        for kw in keywords:
-            if kw in user_input:
-                return room
-    return "客厅"  # 默认
+    return parse_design_requirement(user_input)["room"]
 
 
 def _fallback_prompt_bundle(user_input: str, style: str | None, room: str, reason: str) -> dict:
@@ -157,8 +133,9 @@ def _fallback_prompt_bundle(user_input: str, style: str | None, room: str, reaso
     }
 
 
-def _query_rag(user_input: str, style: str | None, top_k: int = 5) -> str:
-    """查询 RAG 知识库，返回格式化的上下文字符串"""
+@lru_cache(maxsize=64)
+def _query_rag_bundle(user_input: str, style: str | None, top_k: int = 5) -> dict:
+    """Query RAG with citations and degrade cleanly when local assets are unavailable."""
     queries = [user_input]
 
     if style:
@@ -181,18 +158,35 @@ def _query_rag(user_input: str, style: str | None, top_k: int = 5) -> str:
 
     all_results = []
     seen = set()
-    for q in queries:
-        results = query_design_knowledge(q, top_k=3)
-        for r in results:
-            if r["text"][:50] not in seen:
-                seen.add(r["text"][:50])
-                all_results.append(r)
+    try:
+        for q in queries:
+            results = query_design_knowledge(q, top_k=3)
+            for r in results:
+                if r["text"][:50] not in seen:
+                    seen.add(r["text"][:50])
+                    all_results.append(r)
+    except Exception as exc:
+        warning = f"知识库不可用，已使用风格预设继续生成：{exc}"
+        return {
+            "context": f"知识库本轮不可用。{warning}",
+            "citations": [],
+            "warning": warning,
+        }
 
     # 按距离排序，取 top_k
     all_results.sort(key=lambda x: x["distance"] if x["distance"] else 999)
     top_results = all_results[:top_k]
 
-    return format_results(user_input, top_results)
+    return {
+        "context": format_results(user_input, top_results),
+        "citations": build_citations(top_results),
+        "warning": "" if top_results else "知识库未返回相关结果",
+    }
+
+
+def _query_rag(user_input: str, style: str | None, top_k: int = 5) -> str:
+    """Backward-compatible text-only RAG helper."""
+    return _query_rag_bundle(user_input, style, top_k)["context"]
 
 
 def _parse_llm_response(response: str) -> dict:
@@ -251,7 +245,7 @@ def _parse_llm_response(response: str) -> dict:
     return result
 
 
-def run_agent(user_input: str, generate: bool = True) -> dict:
+def run_agent(user_input: str, generate: bool = True, variant: str = "balanced") -> dict:
     """
     Agent 主入口：接收中文设计需求，输出 Prompt + 可选图像。
 
@@ -276,19 +270,27 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
             "raw_llm_response": str,
         }
     """
+    total_started = time.perf_counter()
+    timings = {}
     print("=" * 60)
-    print(f"🎨 室内设计 AI Agent")
-    print(f"📝 需求: {user_input}")
+    print("DesignOps AI Agent")
+    print(f"需求: {user_input}")
     print("=" * 60)
 
     # Step 1: 意图识别
-    style = _detect_style(user_input)
-    room = _detect_room_type(user_input)
-    print(f"\n[Step 1] 意图识别 → 风格: {style or '未识别'}, 房间: {room}")
+    stage_started = time.perf_counter()
+    structured_requirement = parse_design_requirement(user_input)
+    style = structured_requirement["style_code"]
+    room = structured_requirement["room"]
+    timings["parse"] = round(time.perf_counter() - stage_started, 3)
+    print(f"\n[Step 1] 意图识别 -> 风格: {style or '未识别'}, 房间: {room}")
 
     # Step 2: RAG 检索
     print(f"\n[Step 2] 查询设计知识库...")
-    rag_context = _query_rag(user_input, style)
+    stage_started = time.perf_counter()
+    rag_bundle = _query_rag_bundle(user_input, style)
+    rag_context = rag_bundle["context"]
+    timings["rag"] = round(time.perf_counter() - stage_started, 3)
     print(f"  检索到 {rag_context.count('---')} 条相关知识")
 
     # Step 3: LLM 生成提示词
@@ -296,8 +298,17 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
 
     lora_info = LORA_CONFIG if style else {"lora_name": "N/A", "trigger_words": "N/A", "lora_strength": "N/A"}
 
+    variant_instructions = {
+        "balanced": "Balance visual appeal, feasibility, and faithful requirement coverage.",
+        "creative": "Offer a bolder composition and one distinctive design focal point while remaining feasible.",
+        "practical": "Prioritize buildability, furniture scale, circulation, maintenance, and restrained cost.",
+    }
+    variant_instruction = variant_instructions.get(variant, variant_instructions["balanced"])
     prompt = PROMPT_GENERATION_TEMPLATE.format(
-        user_input=f"{user_input}（房间类型：{room}）",
+        user_input=(
+            f"{user_input}\n\n## 结构化需求\n{format_structured_brief(structured_requirement)}"
+            f"\n\n## 候选策略\n{variant_instruction}"
+        ),
         rag_context=rag_context,
         lora_name=lora_info.get("lora_name", "N/A"),
         trigger_words=lora_info.get("trigger_words", "N/A"),
@@ -305,6 +316,8 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
     )
 
     llm_warning = ""
+    generation_mode = "llm"
+    stage_started = time.perf_counter()
     if _should_use_llm():
         try:
             client = _get_llm_client()
@@ -321,14 +334,17 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
             parsed = _parse_llm_response(llm_output)
         except Exception as e:
             llm_warning = f"LLM 调用失败，已切换本地兜底模板：{e}"
-            print(f"  ⚠️ {llm_warning}")
+            print(f"  WARNING: {llm_warning}")
             parsed = _fallback_prompt_bundle(user_input, style, room, llm_warning)
             llm_output = parsed["raw_llm_response"]
+            generation_mode = "fallback"
     else:
         llm_warning = "未检测到 LLM_API_KEY，已切换本地兜底模板"
-        print(f"  ⚠️ {llm_warning}")
+        print(f"  WARNING: {llm_warning}")
         parsed = _fallback_prompt_bundle(user_input, style, room, llm_warning)
         llm_output = parsed["raw_llm_response"]
+        generation_mode = "fallback"
+    timings["llm"] = round(time.perf_counter() - stage_started, 3)
 
     # 如果检测到风格，追加风格预设增强提示词质量
     if style and style in STYLE_PRESETS:
@@ -337,19 +353,29 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
         if not parsed["negative"] or parsed["negative"] == BASE_NEGATIVE_PROMPT:
             parsed["negative"] = f"{preset['negative_boost']}, {parsed['negative']}"
 
+    variant_boosts = {
+        "creative": "bold asymmetrical composition, sculptural focal piece, editorial interior styling",
+        "practical": "buildable layout, clear circulation, ergonomic furniture scale, durable materials",
+    }
+    if variant in variant_boosts:
+        parsed["positive"] = f"{variant_boosts[variant]}, {parsed['positive']}"
+
     # 确保触发词在提示词中
     if style and lora_info.get("trigger_words", "N/A") != "N/A":
         if lora_info["trigger_words"] not in parsed["positive"]:
             parsed["positive"] = f"{lora_info['trigger_words']}, {parsed['positive']}"
 
-    print(f"\n  ✅ 正向提示词: {parsed['positive'][:100]}...")
-    print(f"  ✅ 参数: CFG={parsed['cfg_scale']}, Steps={parsed['steps']}, Sampler={parsed['sampler']}")
+    print(f"\n  正向提示词: {parsed['positive'][:100]}...")
+    print(f"  参数: CFG={parsed['cfg_scale']}, Steps={parsed['steps']}, Sampler={parsed['sampler']}")
 
     result = {
         "user_input": user_input,
         "detected_style": style,
         "detected_room": room,
+        "structured_requirement": structured_requirement,
         "rag_context": rag_context,
+        "rag_citations": rag_bundle["citations"],
+        "rag_warning": rag_bundle["warning"],
         "positive_prompt": parsed["positive"],
         "negative_prompt": parsed["negative"],
         "params": {
@@ -364,14 +390,19 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
         "image": None,
         "raw_llm_response": llm_output,
         "llm_warning": llm_warning,
+        "generation_mode": generation_mode,
+        "variant": variant,
     }
+
+    result["quality"] = evaluate_design_bundle(structured_requirement, result)
 
     # Step 4: 图像生成
     if generate:
+        stage_started = time.perf_counter()
         print(f"\n[Step 4] 调用 ComfyUI 生成图像...")
 
         if not check_comfyui_available():
-            print(f"  ⚠️ ComfyUI 未运行，跳过图像生成")
+            print("  WARNING: ComfyUI 未运行，跳过图像生成")
             print(f"  提示: 先启动 ComfyUI，然后重新运行本脚本")
             result["image"] = {"success": False, "error": "ComfyUI 未运行", "image_path": None}
         else:
@@ -384,13 +415,19 @@ def run_agent(user_input: str, generate: bool = True) -> dict:
             )
             result["image"] = image_result
             if image_result["success"]:
-                print(f"  ✅ 图像已保存: {image_result['image_path']}")
+                print(f"  图像已保存: {image_result['image_path']}")
             else:
-                print(f"  ❌ 生成失败: {image_result['error']}")
+                print(f"  ERROR: 生成失败: {image_result['error']}")
+        timings["image"] = round(time.perf_counter() - stage_started, 3)
+    else:
+        timings["image"] = 0.0
+
+    timings["total"] = round(time.perf_counter() - total_started, 3)
+    result["timings"] = timings
 
     print(f"\n{'=' * 60}")
     if parsed["analysis"]:
-        print(f"📊 设计分析:\n{parsed['analysis']}")
+        print(f"设计分析:\n{parsed['analysis']}")
     print(f"{'=' * 60}")
 
     return result
@@ -407,4 +444,4 @@ if __name__ == "__main__":
     result = run_agent(user_input)
 
     if result.get("error"):
-        print(f"\n❌ {result['error']}")
+        print(f"\nERROR: {result['error']}")
