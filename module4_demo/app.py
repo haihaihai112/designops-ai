@@ -178,7 +178,7 @@ def _dashboard_outputs():
     return metric_html, recent, styles, decisions
 
 
-def generate_candidates(project_name: str, user_input: str, candidate_count: int, enable_image: bool):
+def generate_candidates(project_name: str, user_input: str, candidate_count: int, enable_image: bool, image_provider: str):
     if not user_input or not user_input.strip():
         raise gr.Error("请输入完整的空间设计需求")
 
@@ -190,7 +190,10 @@ def generate_candidates(project_name: str, user_input: str, candidate_count: int
 
     for variant in variants:
         try:
-            result = run_agent(user_input.strip(), generate=enable_image, variant=variant)
+            result = run_agent(
+                user_input.strip(), generate=enable_image, variant=variant,
+                image_provider=image_provider,
+            )
             generated_results.append(result)
         except Exception as exc:
             errors.append(f"{VARIANT_LABELS[variant]}：{exc}")
@@ -347,7 +350,10 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
                     )
                     with gr.Row():
                         candidate_count = gr.Radio([1, 3], value=3, label="候选数量")
-                        enable_image = gr.Checkbox(value=False, label="调用 ComfyUI 出图")
+                        enable_image = gr.Checkbox(value=False, label="启用图像生成")
+                    image_provider = gr.Radio(
+                        ["auto", "comfyui", "openai"], value="auto", label="图像生成通路",
+                    )
                     generate_btn = gr.Button("生成并记录候选", variant="primary", elem_classes="primary-btn")
                     generation_status = gr.Markdown("等待创建任务。", elem_classes="subtle-note")
                     structured_output = gr.Markdown("", elem_classes="markdown-body")
@@ -414,7 +420,7 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
     ]
     generate_btn.click(
         generate_candidates,
-        [project_name, user_input, candidate_count, enable_image],
+        [project_name, user_input, candidate_count, enable_image, image_provider],
         generation_outputs,
     )
     candidate_select.change(

@@ -10,6 +10,7 @@
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,63 @@ from config import EMBEDDING_CONFIG, CHROMA_CONFIG
 # 全局缓存，避免每次查询都重新加载
 _embedding_model = None
 _chroma_collection = None
+
+
+def _tokens(text: str) -> set[str]:
+    """Return lightweight mixed Chinese/English tokens for deterministic reranking."""
+    lowered = text.lower()
+    words = set(re.findall(r"[a-z0-9][a-z0-9_-]+", lowered))
+    cjk = re.findall(r"[\u4e00-\u9fff]", lowered)
+    # Bigrams retain useful Chinese concepts without requiring another model.
+    words.update(cjk)
+    words.update("".join(cjk[i:i + 2]) for i in range(len(cjk) - 1))
+    return {token for token in words if token}
+
+
+def rerank_results(query: str, results: list[dict], top_k: int = 5, diversity: float = 0.25) -> list[dict]:
+    """Apply relevance + MMR-style diversity reranking to vector results.
+
+    Chroma already supplies semantic distance. The lexical overlap term helps
+    short, constraint-heavy Chinese queries, while the redundancy penalty keeps
+    one source from consuming the complete context window.
+    """
+    if not results or top_k <= 0:
+        return []
+    diversity = min(1.0, max(0.0, float(diversity)))
+
+    query_tokens = _tokens(query)
+    scored = []
+    for index, result in enumerate(results):
+        text_tokens = _tokens(result.get("text", ""))
+        overlap = len(query_tokens & text_tokens) / max(len(query_tokens), 1)
+        distance = result.get("distance")
+        semantic = 1.0 / (1.0 + max(float(distance), 0.0)) if distance is not None else 0.0
+        scored.append({"index": index, "score": 0.7 * semantic + 0.3 * overlap, "tokens": text_tokens})
+
+    selected: list[dict] = []
+    remaining = scored[:]
+    while remaining and len(selected) < top_k:
+        best = max(
+            remaining,
+            key=lambda item: item["score"] if not selected else (
+                (1 - diversity) * item["score"]
+                - diversity * max(
+                    _result_similarity(item, chosen, results) for chosen in selected
+                )
+            ),
+        )
+        selected.append(best)
+        remaining.remove(best)
+
+    return [results[item["index"]] for item in selected]
+
+
+def _result_similarity(left: dict, right: dict, results: list[dict]) -> float:
+    """Estimate redundancy using token Jaccard overlap and source repetition."""
+    union = left["tokens"] | right["tokens"]
+    token_similarity = len(left["tokens"] & right["tokens"]) / max(len(union), 1)
+    same_source = results[left["index"]].get("source") == results[right["index"]].get("source")
+    return min(1.0, token_similarity + (0.25 if same_source else 0.0))
 
 
 def _get_embedding_model():

@@ -7,6 +7,14 @@ TECHNICAL_TERMS = (
     "render", "photorealistic", "wide angle", "interior", "lighting", "material",
 )
 
+STYLE_ALIASES = {
+    "wabisabi": ("wabisabi", "wabi-sabi", "wabi sabi", "japandi"),
+    "french_cream": ("french cream", "parisian", "paris"),
+    "minimalist": ("minimalist", "minimalism"),
+    "modern_luxury": ("modern luxury", "quiet luxury"),
+    "scandinavian": ("scandinavian", "nordic"),
+}
+
 KEYWORD_ALIASES = {
     "亚麻": ("linen",), "原木": ("natural wood", "oak", "wood"),
     "实木": ("solid wood",), "微水泥": ("microcement",), "大理石": ("marble",),
@@ -63,13 +71,14 @@ def evaluate_design_bundle(parsed_requirement: dict, result: dict) -> dict:
     }
     room_covered = any(alias in positive for alias in room_aliases.get(room, (room.lower(),)))
     style_code = parsed_requirement.get("style_code")
-    style_covered = not style_code or style_code.replace("_", " ") in positive or any(
+    style_terms = STYLE_ALIASES.get(style_code, ())
+    style_covered = not style_code or any(term in positive for term in style_terms) or any(
         token in positive for token in parsed_requirement.get("style_name", "").lower().split()
     )
     intent_score = round((int(room_covered) + int(style_covered)) / 2 * 100)
 
     deliverables = ["analysis", "coohom_brief", "asset_tags", "social_copy"]
-    complete_count = sum(bool(result.get(field, "").strip()) for field in deliverables)
+    complete_count = sum(bool(str(result.get(field) or "").strip()) for field in deliverables)
     deliverable_score = round(complete_count / len(deliverables) * 100)
 
     technical_hits = sum(term in positive for term in TECHNICAL_TERMS)

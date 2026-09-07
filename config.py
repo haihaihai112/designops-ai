@@ -56,6 +56,18 @@ COMFYUI_CONFIG = {
     "output_dir": str(PROJECT_ROOT / "outputs"),
 }
 
+# ==================== 图像 API 配置 ====================
+# provider=auto 时优先 ComfyUI，ComfyUI 不可用且配置了 Key 时切换 OpenAI。
+IMAGE_CONFIG = {
+    "provider": os.getenv("IMAGE_PROVIDER", "auto").lower(),
+    "api_base": os.getenv("OPENAI_IMAGE_API_BASE", "https://api.openai.com/v1"),
+    "api_key": os.getenv("OPENAI_API_KEY", ""),
+    "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
+    "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
+    "quality": os.getenv("OPENAI_IMAGE_QUALITY", "auto"),
+    "timeout": int(os.getenv("OPENAI_IMAGE_TIMEOUT", "180")),
+}
+
 # ==================== LoRA 配置 ====================
 # 当前暂无风格 LoRA，设为 None 跳过 LoRA 注入
 LORA_CONFIG = {

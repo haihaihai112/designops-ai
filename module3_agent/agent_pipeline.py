@@ -19,8 +19,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import LLM_CONFIG, LORA_CONFIG
-from module2_rag.query_knowledge import build_citations, query_design_knowledge, format_results
+from config import IMAGE_CONFIG, LLM_CONFIG, LORA_CONFIG
+from module2_rag.query_knowledge import (
+    build_citations,
+    query_design_knowledge,
+    format_results,
+    rerank_results,
+)
 from module3_agent.prompt_templates import (
     AGENT_SYSTEM_PROMPT,
     PROMPT_GENERATION_TEMPLATE,
@@ -30,6 +35,7 @@ from module3_agent.prompt_templates import (
 from module3_agent.quality_evaluator import evaluate_design_bundle
 from module3_agent.requirement_parser import format_structured_brief, parse_design_requirement
 from module3_agent.comfyui_client import generate_image, check_comfyui_available
+from module3_agent.openai_image_client import generate_openai_image, is_openai_image_configured
 from openai import OpenAI
 
 
@@ -173,9 +179,8 @@ def _query_rag_bundle(user_input: str, style: str | None, top_k: int = 5) -> dic
             "warning": warning,
         }
 
-    # 按距离排序，取 top_k
-    all_results.sort(key=lambda x: x["distance"] if x["distance"] else 999)
-    top_results = all_results[:top_k]
+    # Relevance + MMR diversity reranking avoids repeating one document/source.
+    top_results = rerank_results(user_input, all_results, top_k=top_k)
 
     return {
         "context": format_results(user_input, top_results),
@@ -245,7 +250,32 @@ def _parse_llm_response(response: str) -> dict:
     return result
 
 
-def run_agent(user_input: str, generate: bool = True, variant: str = "balanced") -> dict:
+def _repair_prompt_coverage(prompt: str, parsed_requirement: dict) -> tuple[str, list[str]]:
+    """Repair dropped hard constraints without spending another LLM call."""
+    from module3_agent.quality_evaluator import KEYWORD_ALIASES
+
+    lowered = prompt.lower()
+    missing: list[str] = []
+    additions: list[str] = []
+    for keyword in parsed_requirement.get("keywords", []):
+        aliases = KEYWORD_ALIASES.get(keyword, ())
+        if keyword.lower() in lowered or any(alias.lower() in lowered for alias in aliases):
+            continue
+        missing.append(keyword)
+        additions.append(aliases[0] if aliases else keyword)
+
+    if not additions:
+        return prompt, missing
+    repaired = ", ".join(additions)
+    return f"{repaired}, {prompt}" if prompt else repaired, missing
+
+
+def run_agent(
+    user_input: str,
+    generate: bool = True,
+    variant: str = "balanced",
+    image_provider: str | None = None,
+) -> dict:
     """
     Agent 主入口：接收中文设计需求，输出 Prompt + 可选图像。
 
@@ -365,6 +395,10 @@ def run_agent(user_input: str, generate: bool = True, variant: str = "balanced")
         if lora_info["trigger_words"] not in parsed["positive"]:
             parsed["positive"] = f"{lora_info['trigger_words']}, {parsed['positive']}"
 
+    parsed["positive"], repaired_constraints = _repair_prompt_coverage(
+        parsed["positive"], structured_requirement
+    )
+
     print(f"\n  正向提示词: {parsed['positive'][:100]}...")
     print(f"  参数: CFG={parsed['cfg_scale']}, Steps={parsed['steps']}, Sampler={parsed['sampler']}")
 
@@ -392,6 +426,10 @@ def run_agent(user_input: str, generate: bool = True, variant: str = "balanced")
         "llm_warning": llm_warning,
         "generation_mode": generation_mode,
         "variant": variant,
+        "prompt_repair": {
+            "applied": bool(repaired_constraints),
+            "constraints": repaired_constraints,
+        },
     }
 
     result["quality"] = evaluate_design_bundle(structured_requirement, result)
@@ -399,13 +437,26 @@ def run_agent(user_input: str, generate: bool = True, variant: str = "balanced")
     # Step 4: 图像生成
     if generate:
         stage_started = time.perf_counter()
-        print(f"\n[Step 4] 调用 ComfyUI 生成图像...")
+        provider = (image_provider or IMAGE_CONFIG.get("provider", "auto")).lower()
+        comfy_available = check_comfyui_available() if provider in {"auto", "comfyui"} else False
+        if provider == "auto":
+            provider = "comfyui" if comfy_available else "openai"
 
-        if not check_comfyui_available():
-            print("  WARNING: ComfyUI 未运行，跳过图像生成")
-            print(f"  提示: 先启动 ComfyUI，然后重新运行本脚本")
-            result["image"] = {"success": False, "error": "ComfyUI 未运行", "image_path": None}
-        else:
+        print(f"\n[Step 4] 图像生成 provider={provider}...")
+        if provider == "openai":
+            if not is_openai_image_configured():
+                result["image"] = {
+                    "success": False,
+                    "provider": "openai",
+                    "error": "ComfyUI 不可用，且未配置 OPENAI_API_KEY",
+                    "image_path": None,
+                }
+            else:
+                result["image"] = generate_openai_image(
+                    positive_prompt=parsed["positive"],
+                    negative_prompt=parsed["negative"],
+                )
+        elif provider == "comfyui" and comfy_available:
             image_result = generate_image(
                 positive_prompt=parsed["positive"],
                 negative_prompt=parsed["negative"],
@@ -418,6 +469,13 @@ def run_agent(user_input: str, generate: bool = True, variant: str = "balanced")
                 print(f"  图像已保存: {image_result['image_path']}")
             else:
                 print(f"  ERROR: 生成失败: {image_result['error']}")
+        else:
+            result["image"] = {
+                "success": False,
+                "provider": provider,
+                "error": "ComfyUI 未运行，请切换 image_provider=openai 或启动 ComfyUI",
+                "image_path": None,
+            }
         timings["image"] = round(time.perf_counter() - stage_started, 3)
     else:
         timings["image"] = 0.0
