@@ -39,8 +39,8 @@ LLM_CONFIG = {
 
 # ==================== Embedding 配置（RAG 向量化） ====================
 EMBEDDING_CONFIG = {
-    "model_name": "BAAI/bge-small-zh-v1.5",  # 轻量中文嵌入，Mac/Windows 都能跑
-    "device": "cpu",                          # 有 GPU 改为 "cuda"
+    "model_name": os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5"),
+    "device": os.getenv("EMBEDDING_DEVICE", "cpu"),
 }
 
 # ==================== ChromaDB 配置 ====================
@@ -51,9 +51,20 @@ CHROMA_CONFIG = {
 
 # ==================== ComfyUI 配置 ====================
 COMFYUI_CONFIG = {
-    "api_base": "http://127.0.0.1:8188",  # ComfyUI 默认地址
-    "timeout": 120,                        # 图像生成超时（秒）
-    "output_dir": str(PROJECT_ROOT / "outputs"),
+    "api_base": os.getenv("COMFYUI_API_BASE", "http://127.0.0.1:8188"),
+    "timeout": int(os.getenv("COMFYUI_TIMEOUT", "120")),
+    "output_dir": os.getenv("COMFYUI_OUTPUT_DIR", str(PROJECT_ROOT / "outputs")),
+}
+
+# ==================== 应用服务配置 ====================
+APP_CONFIG = {
+    "server_name": os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+    "server_port": int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+    "auth_user": os.getenv("GRADIO_AUTH_USER", ""),
+    "auth_password": os.getenv("GRADIO_AUTH_PASSWORD", ""),
+    "auto_build_knowledge_base": os.getenv("AUTO_BUILD_KNOWLEDGE_BASE", "1").lower()
+    in {"1", "true", "yes", "on"},
+    "hf_endpoint": os.getenv("HF_ENDPOINT", "https://hf-mirror.com"),
 }
 
 # ==================== 图像 API 配置 ====================

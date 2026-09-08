@@ -1,28 +1,4 @@
-# ==================================================================
-# 室内设计风格多模态智能体与 LoRA 微调系统
-# 安装: pip install -r requirements.txt --break-system-packages
-# ==================================================================
-
-# --- RAG 知识库 ---
-chromadb>=0.5.0
-sentence-transformers>=2.7.0
-
-# --- Agent 编排 ---
-openai>=1.30.0           # 兼容 DeepSeek / Qwen / Ollama 接口
-langchain-text-splitters>=0.2.0
-
-# --- Web 界面 ---
-gradio>=6.0.0,<7.0.0
-
-# --- 图像处理 ---
-Pillow>=10.0.0
-
-# --- 环境变量 ---
-python-dotenv>=1.0.0
-
-# --- 工具 ---
-requests>=2.31.0
-tqdm>=4.66.0
-
-# --- 测试 ---
-pytest>=8.0.0
+# 完整安装。快速体验可先安装 requirements-core.txt。
+-r requirements-core.txt
+-r requirements-rag.txt
+-r requirements-dev.txt

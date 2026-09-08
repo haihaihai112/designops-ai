@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -10,9 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gradio as gr
 
-from config import COMFYUI_CONFIG, PROJECT_ROOT
+from config import APP_CONFIG, COMFYUI_CONFIG, PROJECT_ROOT
 from module3_agent.agent_pipeline import run_agent
 from module3_agent.comfyui_client import check_comfyui_available
+from module3_agent.floorplan_image import generate_floorplan_render
 from module3_agent.requirement_parser import parse_design_requirement
 from module5_ops.report import VARIANT_LABELS, export_project_report
 from module5_ops.store import (
@@ -298,6 +298,24 @@ def refresh_dashboard():
     return _dashboard_outputs()
 
 
+def generate_floorplan_effect(floorplan_path: str, style_prompt: str, view: str, image_provider: str):
+    """Generate an interior concept image from an uploaded floor plan."""
+    if not floorplan_path:
+        raise gr.Error("请先上传户型图")
+    if (image_provider or "openai").lower() != "openai":
+        return None, "户型图生图当前使用 OpenAI Images 图像编辑接口。当前 ComfyUI 工作流未接入 ControlNet。"
+
+    result = generate_floorplan_render(floorplan_path, style_prompt, view=view)
+    if not result.get("success"):
+        return None, result.get("error", "户型图生图失败")
+    citations = result.get("rag_citations", [])
+    sources = "、".join(item["source"] for item in citations[:3]) or "无"
+    return result["image_path"], (
+        f"已生成户型图效果图，使用模型：`{result.get('model', '-')}`。RAG 参考：{sources}。"
+        "结果用于方案概念展示，不能替代施工图或精确尺寸校核。"
+    )
+
+
 CUSTOM_CSS = """
 :root { --ink:#202624; --muted:#68716d; --line:#dfe4e1; --paper:#ffffff; --canvas:#f3f5f3; --green:#246b52; --amber:#9a651c; }
 .gradio-container { max-width: 1480px !important; margin:0 auto !important; background:var(--canvas) !important; color:var(--ink) !important; }
@@ -385,6 +403,42 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
                     feedback_btn = gr.Button("保存评估")
                     feedback_status = gr.Markdown("")
 
+        with gr.Tab("户型图生图"):
+            gr.Markdown(
+                "上传户型图，填写风格和空间要求，系统会根据平面布局生成一张室内概念效果图。"
+                "当前使用 OpenAI Images 图像编辑接口，结果不用于替代施工图。"
+            )
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=4, elem_classes="workspace-panel"):
+                    floorplan_input = gr.Image(
+                        label="户型图",
+                        type="filepath",
+                        sources=["upload", "clipboard"],
+                        height=360,
+                    )
+                    floorplan_prompt = gr.Textbox(
+                        label="设计要求",
+                        placeholder="例如：原木侘寂风，米色微水泥，客厅带亚麻沙发和暖色灯光",
+                        lines=5,
+                    )
+                    floorplan_view = gr.Radio(
+                        ["客厅主视角", "全屋广角", "餐客厅视角", "卧室视角"],
+                        value="客厅主视角",
+                        label="效果图视角",
+                    )
+                    floorplan_provider = gr.Radio(
+                        ["openai", "comfyui"],
+                        value="openai",
+                        label="图像编辑通路",
+                    )
+                    floorplan_generate_btn = gr.Button("根据户型图生成效果图", variant="primary", elem_classes="primary-btn")
+                with gr.Column(scale=7):
+                    floorplan_output = gr.Image(label="室内概念效果图", type="filepath", height=520)
+                    floorplan_status = gr.Markdown(
+                        "等待上传户型图。",
+                        elem_classes="subtle-note",
+                    )
+
         with gr.Tab("项目库"):
             with gr.Row():
                 project_select = gr.Dropdown(label="项目", choices=_project_choices(), scale=5)
@@ -440,13 +494,23 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
         refresh_dashboard,
         outputs=[dashboard_metrics_html, recent_table, style_table, decision_table],
     )
+    floorplan_generate_btn.click(
+        generate_floorplan_effect,
+        [floorplan_input, floorplan_prompt, floorplan_view, floorplan_provider],
+        [floorplan_output, floorplan_status],
+    )
 
 
 if __name__ == "__main__":
+    auth = None
+    if APP_CONFIG["auth_user"] and APP_CONFIG["auth_password"]:
+        auth = (APP_CONFIG["auth_user"], APP_CONFIG["auth_password"])
+
     demo.queue(default_concurrency_limit=2).launch(
-        server_name="127.0.0.1",
-        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+        server_name=APP_CONFIG["server_name"],
+        server_port=APP_CONFIG["server_port"],
         share=False,
+        auth=auth,
         allowed_paths=[COMFYUI_CONFIG["output_dir"], str(PROJECT_ROOT / "outputs" / "reports")],
         footer_links=[],
         css=CUSTOM_CSS,

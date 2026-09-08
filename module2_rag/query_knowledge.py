@@ -12,17 +12,51 @@
 import os
 import re
 import sys
+import threading
 from pathlib import Path
-
-# 国内网络环境：使用 Hugging Face 镜像站
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import EMBEDDING_CONFIG, CHROMA_CONFIG
+from config import APP_CONFIG, EMBEDDING_CONFIG, CHROMA_CONFIG
+
+# 默认使用镜像站，但允许部署者通过环境变量覆盖。
+os.environ.setdefault("HF_ENDPOINT", APP_CONFIG["hf_endpoint"])
+
 # 全局缓存，避免每次查询都重新加载
 _embedding_model = None
 _chroma_collection = None
+_knowledge_base_lock = threading.Lock()
+
+
+def knowledge_base_ready() -> bool:
+    """检查本地 ChromaDB 是否已经包含可查询的知识库。"""
+    try:
+        import chromadb
+
+        client = chromadb.PersistentClient(path=CHROMA_CONFIG["persist_directory"])
+        collection = client.get_collection(CHROMA_CONFIG["collection_name"])
+        return collection.count() > 0
+    except Exception:
+        return False
+
+
+def ensure_knowledge_base() -> bool:
+    """按需构建知识库，避免用户必须手动执行构建命令。"""
+    if knowledge_base_ready():
+        return True
+    if not APP_CONFIG["auto_build_knowledge_base"]:
+        return False
+
+    with _knowledge_base_lock:
+        if knowledge_base_ready():
+            return True
+        try:
+            from module2_rag.build_knowledge_base import main as build_main
+
+            build_main()
+        except Exception:
+            return False
+    return knowledge_base_ready()
 
 
 def _tokens(text: str) -> set[str]:
@@ -119,6 +153,9 @@ def query_design_knowledge(query: str, top_k: int = 5) -> list[dict]:
         - source: 来源文档名
         - distance: 向量距离（越小越相关）
     """
+    if not ensure_knowledge_base():
+        return []
+
     model = _get_embedding_model()
     collection = _get_collection()
 
