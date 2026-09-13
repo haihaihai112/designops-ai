@@ -21,11 +21,25 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 # ==================== LLM 配置（Agent 大脑） ====================
 # 支持 OpenAI 兼容接口：DeepSeek、Qwen、本地 Ollama 等
 LLM_CONFIG = {
+    "backend": os.getenv("LLM_BACKEND", "openai").lower(),
     "api_base": os.getenv("LLM_API_BASE", "https://api.deepseek.com/v1"),
     "api_key": os.getenv("LLM_API_KEY", ""),
     "model": os.getenv("LLM_MODEL", "deepseek-chat"),
+    # LiteLLM requires an explicit provider prefix, for example
+    # deepseek/deepseek-chat or openai/qwen2.5:7b for a custom endpoint.
+    "litellm_model": os.getenv("LITELLM_MODEL", "deepseek/deepseek-chat"),
     "temperature": 0.7,
     "max_tokens": 2048,
+}
+
+# ==================== 可观测性配置 ====================
+OBSERVABILITY_CONFIG = {
+    "enabled": os.getenv("PHOENIX_ENABLED", "0").lower() in {"1", "true", "yes", "on"},
+    "project_name": os.getenv("PHOENIX_PROJECT_NAME", "interiorforge-ai"),
+    "endpoint": os.getenv(
+        "PHOENIX_COLLECTOR_ENDPOINT",
+        "http://localhost:6006/v1/traces",
+    ),
 }
 
 # 如果使用本地 Ollama，取消下面注释并注释上面
@@ -65,18 +79,52 @@ APP_CONFIG = {
     "auto_build_knowledge_base": os.getenv("AUTO_BUILD_KNOWLEDGE_BASE", "1").lower()
     in {"1", "true", "yes", "on"},
     "hf_endpoint": os.getenv("HF_ENDPOINT", "https://hf-mirror.com"),
+    "cors_origins": [
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000",
+        ).split(",")
+        if origin.strip()
+    ],
 }
 
 # ==================== 图像 API 配置 ====================
-# provider=auto 时优先 ComfyUI，ComfyUI 不可用且配置了 Key 时切换 OpenAI。
+# 产品默认使用 OpenAI；私有化场景可显式启用隐藏的 ComfyUI 适配器。
 IMAGE_CONFIG = {
-    "provider": os.getenv("IMAGE_PROVIDER", "auto").lower(),
+    "provider": os.getenv("IMAGE_PROVIDER", "openai").lower(),
     "api_base": os.getenv("OPENAI_IMAGE_API_BASE", "https://api.openai.com/v1"),
     "api_key": os.getenv("OPENAI_API_KEY", ""),
     "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
     "size": os.getenv("OPENAI_IMAGE_SIZE", "1024x1024"),
     "quality": os.getenv("OPENAI_IMAGE_QUALITY", "auto"),
     "timeout": int(os.getenv("OPENAI_IMAGE_TIMEOUT", "180")),
+    "estimated_cost_usd": float(os.getenv("IMAGE_ESTIMATED_COST_USD", "0")),
+    "enable_comfyui_adapter": os.getenv("ENABLE_COMFYUI_ADAPTER", "0").lower()
+    in {"1", "true", "yes", "on"},
+}
+
+VISION_CONFIG = {
+    "api_base": os.getenv("VISION_API_BASE", "https://api.openai.com/v1"),
+    "api_key": os.getenv("VISION_API_KEY", os.getenv("OPENAI_API_KEY", "")),
+    # Kept empty by default so deployments explicitly select an available
+    # vision-capable model instead of assuming account access.
+    "model": os.getenv("VISION_MODEL", ""),
+    "detail": os.getenv("VISION_IMAGE_DETAIL", "low"),
+}
+
+# ==================== 异步任务与预算 ====================
+TASK_CONFIG = {
+    "backend": os.getenv("TASK_QUEUE_BACKEND", "inline").lower(),
+    "redis_url": os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+    "queue_name": os.getenv("TASK_QUEUE_NAME", "interiorforge"),
+    "timeout_seconds": int(os.getenv("TASK_TIMEOUT_SECONDS", "600")),
+    "max_retries": int(os.getenv("TASK_MAX_RETRIES", "2")),
+}
+
+BUDGET_CONFIG = {
+    "per_job_usd": float(os.getenv("MAX_JOB_COST_USD", "0")),
+    "monthly_usd": float(os.getenv("MONTHLY_IMAGE_BUDGET_USD", "0")),
 }
 
 # ==================== LoRA 配置 ====================

@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-core.txt requirements-rag.txt requirements-dev.txt ./
+COPY requirements.txt requirements-core.txt requirements-rag.txt requirements-aiops.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .

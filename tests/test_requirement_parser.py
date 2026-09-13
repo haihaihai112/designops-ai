@@ -22,3 +22,11 @@ def test_format_brief_handles_missing_area():
     assert "Room: 书房" in brief
     assert "Area: not specified" in brief
 
+
+def test_parse_extended_material_furniture_and_lighting_terms():
+    parsed = parse_design_requirement("北欧书房，木饰面、石材、书柜、浴室柜和阅读灯")
+
+    assert {"木饰面", "石材"}.issubset(parsed["constraints"]["materials"])
+    assert {"书柜", "浴室柜"}.issubset(parsed["constraints"]["furniture"])
+    assert "阅读灯" in parsed["constraints"]["lighting"]
+

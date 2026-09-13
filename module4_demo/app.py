@@ -11,7 +11,6 @@ import gradio as gr
 
 from config import APP_CONFIG, COMFYUI_CONFIG, PROJECT_ROOT
 from module3_agent.agent_pipeline import run_agent
-from module3_agent.comfyui_client import check_comfyui_available
 from module3_agent.floorplan_image import generate_floorplan_render
 from module3_agent.requirement_parser import parse_design_requirement
 from module5_ops.report import VARIANT_LABELS, export_project_report
@@ -178,7 +177,7 @@ def _dashboard_outputs():
     return metric_html, recent, styles, decisions
 
 
-def generate_candidates(project_name: str, user_input: str, candidate_count: int, enable_image: bool, image_provider: str):
+def generate_candidates(project_name: str, user_input: str, candidate_count: int, enable_image: bool):
     if not user_input or not user_input.strip():
         raise gr.Error("请输入完整的空间设计需求")
 
@@ -192,7 +191,7 @@ def generate_candidates(project_name: str, user_input: str, candidate_count: int
         try:
             result = run_agent(
                 user_input.strip(), generate=enable_image, variant=variant,
-                image_provider=image_provider,
+                image_provider="openai",
             )
             generated_results.append(result)
         except Exception as exc:
@@ -298,13 +297,10 @@ def refresh_dashboard():
     return _dashboard_outputs()
 
 
-def generate_floorplan_effect(floorplan_path: str, style_prompt: str, view: str, image_provider: str):
+def generate_floorplan_effect(floorplan_path: str, style_prompt: str, view: str):
     """Generate an interior concept image from an uploaded floor plan."""
     if not floorplan_path:
         raise gr.Error("请先上传户型图")
-    if (image_provider or "openai").lower() != "openai":
-        return None, "户型图生图当前使用 OpenAI Images 图像编辑接口。当前 ComfyUI 工作流未接入 ControlNet。"
-
     result = generate_floorplan_render(floorplan_path, style_prompt, view=view)
     if not result.get("success"):
         return None, result.get("error", "户型图生图失败")
@@ -345,11 +341,10 @@ footer { display:none !important; }
 
 
 with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
-    comfy_state = "ComfyUI 已连接" if check_comfyui_available() else "ComfyUI 离线 · 文本链路可用"
     gr.HTML(f"""
     <header class="app-header">
       <div><h1 style="color:#ffffff">DesignOps AI</h1><p>室内设计模型运营工作台 · 生成、评估、反馈与版本追踪</p></div>
-      <div class="system-state">{comfy_state}</div>
+      <div class="system-state">API 图像服务</div>
     </header>
     """)
 
@@ -369,9 +364,6 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
                     with gr.Row():
                         candidate_count = gr.Radio([1, 3], value=3, label="候选数量")
                         enable_image = gr.Checkbox(value=False, label="启用图像生成")
-                    image_provider = gr.Radio(
-                        ["auto", "comfyui", "openai"], value="auto", label="图像生成通路",
-                    )
                     generate_btn = gr.Button("生成并记录候选", variant="primary", elem_classes="primary-btn")
                     generation_status = gr.Markdown("等待创建任务。", elem_classes="subtle-note")
                     structured_output = gr.Markdown("", elem_classes="markdown-body")
@@ -426,11 +418,6 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
                         value="客厅主视角",
                         label="效果图视角",
                     )
-                    floorplan_provider = gr.Radio(
-                        ["openai", "comfyui"],
-                        value="openai",
-                        label="图像编辑通路",
-                    )
                     floorplan_generate_btn = gr.Button("根据户型图生成效果图", variant="primary", elem_classes="primary-btn")
                 with gr.Column(scale=7):
                     floorplan_output = gr.Image(label="室内概念效果图", type="filepath", height=520)
@@ -474,7 +461,7 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
     ]
     generate_btn.click(
         generate_candidates,
-        [project_name, user_input, candidate_count, enable_image, image_provider],
+        [project_name, user_input, candidate_count, enable_image],
         generation_outputs,
     )
     candidate_select.change(
@@ -496,7 +483,7 @@ with gr.Blocks(title="DesignOps AI · 模型运营工作台") as demo:
     )
     floorplan_generate_btn.click(
         generate_floorplan_effect,
-        [floorplan_input, floorplan_prompt, floorplan_view, floorplan_provider],
+        [floorplan_input, floorplan_prompt, floorplan_view],
         [floorplan_output, floorplan_status],
     )
 

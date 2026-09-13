@@ -8,7 +8,12 @@ from config import PROJECT_ROOT
 from module5_ops.store import DEFAULT_DB_PATH, get_project
 
 
-VARIANT_LABELS = {"balanced": "均衡方案", "creative": "创意方案", "practical": "落地方案"}
+VARIANT_LABELS = {
+    "balanced": "均衡方案",
+    "creative": "创意方案",
+    "practical": "落地方案",
+    "iteration": "迭代方案",
+}
 
 
 def _safe_name(value: str) -> str:
@@ -58,6 +63,8 @@ def export_project_report(
             f"- 生成模式：{candidate.get('generation_mode')}",
             f"- 总耗时：{candidate.get('duration_seconds')} 秒",
             f"- 采用状态：{'已采用' if candidate.get('selected') else '未采用'}",
+            f"- 父版本候选：{candidate.get('parent_candidate_id') or '无'}",
+            f"- 迭代要求：{candidate.get('iteration_instruction') or '无'}",
             f"- 图片：{candidate.get('image_path') or '未生成'}",
             "",
             "**正向提示词**",

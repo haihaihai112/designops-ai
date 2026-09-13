@@ -7,9 +7,82 @@ services:
     environment:
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
     ports:
       - "${GRADIO_SERVER_PORT:-7860}:7860"
     volumes:
       - ./outputs:/app/outputs
       - ./module2_rag/chroma_db:/app/module2_rag/chroma_db
     restart: unless-stopped
+
+  api:
+    build: .
+    command: uvicorn module7_api.app:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    environment:
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+      TASK_QUEUE_BACKEND: rq
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./module2_rag/chroma_db:/app/module2_rag/chroma_db
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: rq worker -u redis://redis:6379/0 interiorforge
+    env_file:
+      - .env
+    environment:
+      TASK_QUEUE_BACKEND: rq
+      REDIS_URL: redis://redis:6379/0
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+    volumes:
+      - ./outputs:/app/outputs
+      - ./module2_rag/chroma_db:/app/module2_rag/chroma_db
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    profiles: ["observability"]
+    ports:
+      - "6006:6006"
+      - "4317:4317"
+    restart: unless-stopped
+
+volumes:
+  redis-data:

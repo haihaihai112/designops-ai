@@ -1,4 +1,5 @@
 # 完整安装。快速体验可先安装 requirements-core.txt。
 -r requirements-core.txt
 -r requirements-rag.txt
+-r requirements-aiops.txt
 -r requirements-dev.txt

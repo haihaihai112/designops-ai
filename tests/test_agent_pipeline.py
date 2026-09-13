@@ -1,6 +1,13 @@
 from module3_agent import agent_pipeline
 
 
+def test_placeholder_api_key_does_not_enable_remote_llm(monkeypatch):
+    monkeypatch.setitem(agent_pipeline.LLM_CONFIG, "api_base", "https://api.deepseek.com/v1")
+    monkeypatch.setitem(agent_pipeline.LLM_CONFIG, "api_key", "your-api-key")
+
+    assert agent_pipeline._should_use_llm() is False
+
+
 def test_agent_fallback_contract(monkeypatch):
     monkeypatch.setattr(agent_pipeline, "_should_use_llm", lambda: False)
     monkeypatch.setattr(
@@ -23,4 +30,6 @@ def test_agent_fallback_contract(monkeypatch):
     assert result["quality"]["overall"] > 0
     assert result["timings"]["image"] == 0
     assert result["timings"]["total"] >= 0
+    assert result["llm_backend"] in {"openai", "litellm"}
+    assert result["observability"]["active"] is False
 

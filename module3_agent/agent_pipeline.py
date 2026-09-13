@@ -34,23 +34,18 @@ from module3_agent.prompt_templates import (
 )
 from module3_agent.quality_evaluator import evaluate_design_bundle
 from module3_agent.requirement_parser import format_structured_brief, parse_design_requirement
-from module3_agent.comfyui_client import generate_image, check_comfyui_available
-from module3_agent.openai_image_client import generate_openai_image, is_openai_image_configured
-from openai import OpenAI
-
-
-def _get_llm_client():
-    """获取 OpenAI 兼容的 LLM 客户端（DeepSeek / Qwen / Ollama）"""
-    return OpenAI(
-        base_url=LLM_CONFIG["api_base"],
-        api_key=LLM_CONFIG["api_key"],
-    )
+from module3_agent.image_provider import get_image_provider
+from module3_agent.model_gateway import complete_chat
+from module3_agent.visual_evaluator import evaluate_generated_image
+from module6_observability import initialize_observability, trace_span
 
 
 def _should_use_llm() -> bool:
     """判断当前配置是否足够调用 LLM。Ollama 等本地服务允许使用占位 key。"""
     api_base = LLM_CONFIG["api_base"].lower()
-    has_key = bool(LLM_CONFIG["api_key"].strip())
+    api_key = LLM_CONFIG["api_key"].strip().lower()
+    placeholder_keys = {"", "your-api-key", "your_api_key", "replace-me", "changeme"}
+    has_key = api_key not in placeholder_keys
     is_local = "localhost" in api_base or "127.0.0.1" in api_base
     return has_key or is_local
 
@@ -68,7 +63,7 @@ def _detect_room_type(user_input: str) -> str:
 def _fallback_prompt_bundle(user_input: str, style: str | None, room: str, reason: str) -> dict:
     """
     LLM 不可用时的本地兜底输出。
-    这样演示现场即使没有 API Key，也能继续调 ComfyUI 生成图片。
+    即使文本模型不可用，也能继续组织图片 API 所需的提示词和交付信息。
     """
     room_prompt = {
         "客厅": "living room, sofa area, coffee table, large window, balanced layout",
@@ -105,7 +100,7 @@ def _fallback_prompt_bundle(user_input: str, style: str | None, room: str, reaso
         "analysis": (
             f"LLM 未启用，已使用本地兜底模板生成提示词。原因：{reason}。"
             f"当前方案按「{style_name}」和「{room}」组织空间、材质、灯光与相机视角，"
-            "可用于现场演示 ComfyUI 出图链路。"
+            "可继续用于 API 生图或设计交付。"
         ),
         "coohom_brief": (
             f"Room type: {room}\n"
@@ -270,7 +265,7 @@ def _repair_prompt_coverage(prompt: str, parsed_requirement: dict) -> tuple[str,
     return f"{repaired}, {prompt}" if prompt else repaired, missing
 
 
-def run_agent(
+def _run_agent_impl(
     user_input: str,
     generate: bool = True,
     variant: str = "balanced",
@@ -281,7 +276,7 @@ def run_agent(
 
     参数:
         user_input: 中文设计需求，如 "20平米侘寂风客厅，带落地窗"
-        generate: 是否调用 ComfyUI 生成图像（需要 ComfyUI 在运行）
+        generate: 是否调用已配置的图片 Provider 生成图像
 
     返回:
         {
@@ -309,7 +304,8 @@ def run_agent(
 
     # Step 1: 意图识别
     stage_started = time.perf_counter()
-    structured_requirement = parse_design_requirement(user_input)
+    with trace_span("requirement.parse", {"input.length": len(user_input)}):
+        structured_requirement = parse_design_requirement(user_input)
     style = structured_requirement["style_code"]
     room = structured_requirement["room"]
     timings["parse"] = round(time.perf_counter() - stage_started, 3)
@@ -318,7 +314,8 @@ def run_agent(
     # Step 2: RAG 检索
     print(f"\n[Step 2] 查询设计知识库...")
     stage_started = time.perf_counter()
-    rag_bundle = _query_rag_bundle(user_input, style)
+    with trace_span("knowledge.retrieve", {"design.style": style or "unknown", "design.room": room}):
+        rag_bundle = _query_rag_bundle(user_input, style)
     rag_context = rag_bundle["context"]
     timings["rag"] = round(time.perf_counter() - stage_started, 3)
     print(f"  检索到 {rag_context.count('---')} 条相关知识")
@@ -350,17 +347,14 @@ def run_agent(
     stage_started = time.perf_counter()
     if _should_use_llm():
         try:
-            client = _get_llm_client()
-            response = client.chat.completions.create(
-                model=LLM_CONFIG["model"],
-                messages=[
+            with trace_span(
+                "design.generate_prompt",
+                {"llm.backend": LLM_CONFIG["backend"], "llm.model": LLM_CONFIG["model"]},
+            ):
+                llm_output = complete_chat([
                     {"role": "system", "content": AGENT_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
-                ],
-                temperature=LLM_CONFIG["temperature"],
-                max_tokens=LLM_CONFIG["max_tokens"],
-            )
-            llm_output = response.choices[0].message.content
+                ])
             parsed = _parse_llm_response(llm_output)
         except Exception as e:
             llm_warning = f"LLM 调用失败，已切换本地兜底模板：{e}"
@@ -432,53 +426,59 @@ def run_agent(
         },
     }
 
-    result["quality"] = evaluate_design_bundle(structured_requirement, result)
+    with trace_span("design.evaluate"):
+        result["quality"] = evaluate_design_bundle(structured_requirement, result)
 
     # Step 4: 图像生成
     if generate:
         stage_started = time.perf_counter()
-        provider = (image_provider or IMAGE_CONFIG.get("provider", "auto")).lower()
-        comfy_available = check_comfyui_available() if provider in {"auto", "comfyui"} else False
-        if provider == "auto":
-            provider = "comfyui" if comfy_available else "openai"
-
-        print(f"\n[Step 4] 图像生成 provider={provider}...")
-        if provider == "openai":
-            if not is_openai_image_configured():
-                result["image"] = {
-                    "success": False,
-                    "provider": "openai",
-                    "error": "ComfyUI 不可用，且未配置 OPENAI_API_KEY",
-                    "image_path": None,
-                }
-            else:
-                result["image"] = generate_openai_image(
+        provider_name = (image_provider or IMAGE_CONFIG.get("provider", "openai")).lower()
+        print(f"\n[Step 4] 图像生成 provider={provider_name}...")
+        try:
+            provider = get_image_provider(provider_name)
+            with trace_span("image.generate", {"image.provider": provider_name}):
+                result["image"] = provider.generate(
                     positive_prompt=parsed["positive"],
                     negative_prompt=parsed["negative"],
+                    steps=parsed["steps"],
+                    cfg_scale=parsed["cfg_scale"],
+                    sampler=parsed["sampler"],
                 )
-        elif provider == "comfyui" and comfy_available:
-            image_result = generate_image(
-                positive_prompt=parsed["positive"],
-                negative_prompt=parsed["negative"],
-                steps=parsed["steps"],
-                cfg_scale=parsed["cfg_scale"],
-                sampler=parsed["sampler"],
-            )
-            result["image"] = image_result
-            if image_result["success"]:
-                print(f"  图像已保存: {image_result['image_path']}")
-            else:
-                print(f"  ERROR: 生成失败: {image_result['error']}")
-        else:
+        except Exception as exc:
             result["image"] = {
                 "success": False,
-                "provider": provider,
-                "error": "ComfyUI 未运行，请切换 image_provider=openai 或启动 ComfyUI",
+                "provider": provider_name,
+                "error": f"图像 Provider 调用失败：{exc}",
                 "image_path": None,
             }
         timings["image"] = round(time.perf_counter() - stage_started, 3)
     else:
         timings["image"] = 0.0
+
+    image = result.get("image") or {}
+    if image.get("success"):
+        with trace_span("image.evaluate"):
+            result["visual_quality"] = evaluate_generated_image(
+                image.get("image_path"), user_input
+            )
+    else:
+        result["visual_quality"] = {
+            "status": "not_run",
+            "overall": None,
+            "reason": image.get("error") or "本轮未请求图片",
+        }
+
+    visual_score = result["visual_quality"].get("overall")
+    prompt_score = result["quality"]["overall"]
+    result["decision_score"] = (
+        round(prompt_score * 0.4 + visual_score * 0.6)
+        if isinstance(visual_score, (int, float))
+        else prompt_score
+    )
+    result["costs"] = {
+        "image_estimated_usd": float(image.get("estimated_cost_usd", 0.0)),
+        "is_estimate": True,
+    }
 
     timings["total"] = round(time.perf_counter() - total_started, 3)
     result["timings"] = timings
@@ -488,6 +488,31 @@ def run_agent(
         print(f"设计分析:\n{parsed['analysis']}")
     print(f"{'=' * 60}")
 
+    return result
+
+
+def run_agent(
+    user_input: str,
+    generate: bool = True,
+    variant: str = "balanced",
+    image_provider: str | None = None,
+) -> dict:
+    """Run the design pipeline inside an optional Phoenix root span."""
+    observability = initialize_observability()
+    attributes = {
+        "design.variant": variant,
+        "image.requested": generate,
+        "llm.backend": LLM_CONFIG["backend"],
+    }
+    with trace_span("interiorforge.run_agent", attributes):
+        result = _run_agent_impl(
+            user_input,
+            generate=generate,
+            variant=variant,
+            image_provider=image_provider,
+        )
+    result["observability"] = observability
+    result["llm_backend"] = LLM_CONFIG["backend"]
     return result
 
 

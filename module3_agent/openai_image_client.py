@@ -1,4 +1,4 @@
-"""OpenAI Images API client used as a cloud alternative to ComfyUI."""
+"""OpenAI Images API client used by the default image-generation path."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from config import IMAGE_CONFIG, PROJECT_ROOT
 
 def is_openai_image_configured() -> bool:
     """Return whether a non-empty API key is available."""
-    return bool(IMAGE_CONFIG.get("api_key", "").strip())
+    key = IMAGE_CONFIG.get("api_key", "").strip().lower()
+    return key not in {"", "your-api-key", "your_api_key", "replace-me", "changeme"}
 
 
 def _safe_output_path() -> Path:
@@ -75,6 +76,7 @@ def generate_openai_image(
             size=size or IMAGE_CONFIG["size"],
             quality=quality or IMAGE_CONFIG["quality"],
         )
+        response_data = response.model_dump() if hasattr(response, "model_dump") else {}
         first_image = response.data[0] if response.data else None
         if first_image is None:
             data = {}
@@ -96,6 +98,7 @@ def generate_openai_image(
             "provider": "openai",
             "image_path": str(path),
             "model": IMAGE_CONFIG["model"],
+            "usage": response_data.get("usage"),
             "error": None,
         }
     except Exception as exc:

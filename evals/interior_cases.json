@@ -1,0 +1,32 @@
+[
+  {
+    "id": "wabisabi-living-01",
+    "requirement": "20平米侘寂风客厅，亚麻沙发、落地窗和通透动线",
+    "expected": {"style_code": "wabisabi", "room": "客厅", "area_sqm": 20, "keywords": ["亚麻", "落地窗", "沙发", "通透"]}
+  },
+  {
+    "id": "minimal-bedroom-01",
+    "requirement": "16平米极简卧室，木饰面、双人床和柔和自然光",
+    "expected": {"style_code": "minimalist", "room": "卧室", "area_sqm": 16, "keywords": ["木饰面", "双人床", "自然光"]}
+  },
+  {
+    "id": "scandi-study-01",
+    "requirement": "12平米北欧风书房，需要书桌、书柜、原木和阅读灯",
+    "expected": {"style_code": "scandinavian", "room": "书房", "area_sqm": 12, "keywords": ["书桌", "书柜", "原木", "阅读灯"]}
+  },
+  {
+    "id": "french-dining-01",
+    "requirement": "18平米法式奶油风餐厅，圆形餐桌、吊灯和暖白色墙面",
+    "expected": {"style_code": "french_cream", "room": "餐厅", "area_sqm": 18, "keywords": ["餐桌", "吊灯"]}
+  },
+  {
+    "id": "luxury-kitchen-01",
+    "requirement": "25平米现代轻奢厨房，岛台、石材台面和隐藏灯带",
+    "expected": {"style_code": "modern_luxury", "room": "厨房", "area_sqm": 25, "keywords": ["岛台", "石材", "灯带"]}
+  },
+  {
+    "id": "wabisabi-bath-01",
+    "requirement": "8平米侘寂风卫生间，微水泥、壁挂浴室柜和干湿分离",
+    "expected": {"style_code": "wabisabi", "room": "卫生间", "area_sqm": 8, "keywords": ["微水泥", "浴室柜", "干湿分离"]}
+  }
+]
